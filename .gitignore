@@ -21,3 +21,8 @@ preview/
 
 # 无头浏览器临时 profile
 .edge_shot/
+
+#agent
+.workbuddy/
+.claude/
+
