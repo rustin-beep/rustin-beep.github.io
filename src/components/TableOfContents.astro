@@ -1,0 +1,79 @@
+---
+import type { MarkdownHeading } from 'astro';
+
+interface Props {
+  headings: MarkdownHeading[];
+}
+
+const { headings } = Astro.props;
+
+/**
+ * 只取 h2 / h3。h1 是文章标题本身（不重复进目录），
+ * h4 及以下太碎——技术文里常是参数名一类，进目录只会把目录撑成一堵墙。
+ * 少于 2 条就不渲染：只有一个小节的目录没有意义，只是占版面。
+ */
+const items = headings.filter((h) => h.depth >= 2 && h.depth <= 3);
+const show = items.length >= 2;
+
+/**
+ * 锚点来自 Astro 内置的 rehypeHeadingIds（它同时把 id 写进 HTML、把 headings
+ * 数组交给布局）。刻意**不装 rehype-slug**：两套 id 体系会错位，目录点了跳不动。
+ * 见 PLAN.md §六之三。
+ */
+---
+
+{
+  show && (
+    <>
+      <nav class="toc" aria-labelledby="toc-title">
+        <details class="toc__box" open>
+          <summary class="toc__summary" id="toc-title">
+            目录 <span class="toc__count">{items.length}</span>
+          </summary>
+          <ol class="toc__list">
+            {items.map((h) => (
+              <li class:list={['toc__item', `toc__item--h${h.depth}`]}>
+                <a href={`#${h.slug}`}>{h.text}</a>
+              </li>
+            ))}
+          </ol>
+        </details>
+      </nav>
+
+      {/*
+        目录点击 = 自己滚过去，**不做页面导航**。
+
+        为什么不用纯 href="#id"：hash 跳转会触发一次文档内导航——URL 变了、
+        历史里多一条记录；放在 iframe / 预览面板这类宿主里，表现出来就是
+        "又嵌了一层页面"，越点越深。这里 preventDefault 之后自己 scrollIntoView，
+        URL 一个字节都不动，历史也不增长。
+
+        href 保留不删：禁用 JS 时自动退化为原生锚点，中键、Ctrl/Shift 点击、
+        "复制链接地址"也都还照旧能用——渐进增强，不是替换。
+      */}
+      <script is:inline>
+        document.querySelectorAll('.toc__item a').forEach((a) => {
+          a.addEventListener('click', (e) => {
+            if (e.defaultPrevented || e.button !== 0) return;
+            if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+            const href = a.getAttribute('href') || '';
+            if (href.charAt(0) !== '#') return;
+            const target = document.getElementById(href.slice(1));
+            if (!target) return;
+            e.preventDefault();
+            const reduce = window.matchMedia(
+              '(prefers-reduced-motion: reduce)',
+            ).matches;
+            target.scrollIntoView({
+              behavior: reduce ? 'auto' : 'smooth',
+              block: 'start',
+            });
+            // 键盘与读屏的焦点跟着走（preventScroll 免得把上一步的滚动抵消掉）
+            target.setAttribute('tabindex', '-1');
+            target.focus({ preventScroll: true });
+          });
+        });
+      </script>
+    </>
+  )
+}

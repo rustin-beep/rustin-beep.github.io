@@ -1,21 +1,30 @@
 ---
-import { getCollection } from 'astro:content';
 import BaseLayout from '../layouts/BaseLayout.astro';
+import {
+  allPublishedPosts,
+  groupByYear,
+  postHref,
+  isCurrentPost,
+  isArchivedPost,
+} from '../lib/posts';
 
-const posts = (await getCollection('posts', ({ data }) => !data.draft)).sort(
-  (a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf(),
-);
+/**
+ * 归档页 —— 分两组，这是这一页存在的意义
+ * ----------------------------------------------------------------------------
+ * 原先这一页把所有文章按年混在一起："还在维护的"和"已经退场、结论过时的"
+ * 长得一模一样，读者分不出来，等于没有归档语义。
+ * 现在分成两块：现存 / 已归档。
+ * 组内仍各自按年份分组——年份是第二层信息，不是第一层。
+ *
+ * ★ 分组判据是**文件是否在 archive/ 目录里**，不是 frontmatter 字段：
+ *   归档 = 把文件搬过去，搬完这一页自动就对。
+ */
+const all = await allPublishedPosts();
+const current = all.filter(isCurrentPost);
+const archived = all.filter(isArchivedPost);
 
-const byYear = new Map<number, typeof posts>();
-for (const post of posts) {
-  const year = post.data.pubDate.getFullYear();
-  const bucket = byYear.get(year);
-  if (bucket) {
-    bucket.push(post);
-  } else {
-    byYear.set(year, [post]);
-  }
-}
+const currentByYear = groupByYear(current);
+const archivedByYear = groupByYear(archived);
 
 const dayFmt = new Intl.DateTimeFormat('zh-CN', {
   month: '2-digit',
@@ -23,30 +32,71 @@ const dayFmt = new Intl.DateTimeFormat('zh-CN', {
 });
 ---
 
-<BaseLayout title="归档" description="全部文章按年份归档">
+<BaseLayout title="归档" description="全部文章按年份归档，分为现存与已归档两组">
   <h1 class="page-title">归档</h1>
+  <p class="archive-lead">
+    共 {all.length} 篇：<strong>现存 {current.length}</strong> 篇 ·
+    <strong>已归档 {archived.length}</strong> 篇。
+  </p>
+
+  <section class="archive-group">
+    <h2 class="archive-group__title">
+      现存 <span class="archive-group__count">{current.length}</span>
+    </h2>
+    {
+      currentByYear.map(([year, items]) => (
+        <section>
+          <h3 class="archive-year">{year}</h3>
+          <ul class="post-list">
+            {items.map((post) => (
+              <li class="post-card">
+                <h4 class="post-card__title">
+                  <a href={postHref(post)}>{post.data.title}</a>
+                </h4>
+                <p class="post-card__meta">
+                  <time datetime={post.data.pubDate.toISOString()}>
+                    {dayFmt.format(post.data.pubDate)}
+                  </time>
+                </p>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))
+    }
+  </section>
 
   {
-    [...byYear.entries()].map(([year, items]) => (
-      <section>
-        <h2 class="archive-year">{year}</h2>
-        <ul class="post-list">
-          {items.map((post) => (
-            <li class="post-card">
-              <h3 class="post-card__title">
-                <a href={`/posts/${post.data.slug ?? post.id}`}>
-                  {post.data.title}
-                </a>
-              </h3>
-              <p class="post-card__meta">
-                <time datetime={post.data.pubDate.toISOString()}>
-                  {dayFmt.format(post.data.pubDate)}
-                </time>
-              </p>
-            </li>
-          ))}
-        </ul>
+    archived.length > 0 && (
+      <section class="archive-group archive-group--archived">
+        <h2 class="archive-group__title">
+          已归档 <span class="archive-group__count">{archived.length}</span>
+        </h2>
+        <p class="archive-group__note">
+          内容保留、外链有效，但<strong>不再更新</strong>——其中的结论可能已随版本变化而过时，
+          不要当现状引用。要读最新的，看上面那一组。
+        </p>
+        {archivedByYear.map(([year, items]) => (
+          <section>
+            <h3 class="archive-year">{year}</h3>
+            <ul class="post-list">
+              {items.map((post) => (
+                <li class="post-card">
+                  <h4 class="post-card__title">
+                    <a href={postHref(post)}>{post.data.title}</a>
+                  </h4>
+                  <p class="post-card__meta">
+                    <span class="badge">已归档</span>
+                    <time datetime={post.data.pubDate.toISOString()}>
+                      {dayFmt.format(post.data.pubDate)}
+                    </time>
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))}
       </section>
-    ))
+    )
   }
 </BaseLayout>

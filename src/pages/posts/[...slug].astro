@@ -1,21 +1,29 @@
 ---
-import { getCollection, render } from 'astro:content';
+import { render } from 'astro:content';
 import PostLayout from '../../layouts/PostLayout.astro';
+import { allPublishedPosts, postNeighbors, postSlug } from '../../lib/posts';
 
 export async function getStaticPaths() {
-  const posts = await getCollection('posts', ({ data }) => !data.draft);
+  const posts = await allPublishedPosts();
   return posts.map((post) => ({
     // slug 显式优先；缺省回退 id（文件名去扩展名）
-    params: { slug: post.data.slug ?? post.id },
+    params: { slug: postSlug(post) },
     props: { post },
   }));
 }
 
 const { post } = Astro.props;
-// render() 是从 astro:content 导入的函数（Astro 5+），不再是条目上的方法
-const { Content } = await render(post);
+
+// render() 是从 astro:content 导入的函数（Astro 5+），不再是条目上的方法。
+// 它同时把 headings（标题层级 + 已生成好的 id）交出来——文章目录直接用这个，
+// 不自己再解析一遍（见组件的注释：另起一套 id 体系会让锚点对不上）。
+const { Content, headings } = await render(post);
+
+// 上一篇 / 下一篇。用同一份排序好的全集，包含已归档的文章——
+// 否则从一篇老文走进来就断链了。
+const { older, newer } = postNeighbors(await allPublishedPosts(), post);
 ---
 
-<PostLayout post={post}>
+<PostLayout post={post} headings={headings} older={older} newer={newer}>
   <Content />
 </PostLayout>

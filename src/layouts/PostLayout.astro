@@ -1,22 +1,31 @@
 ---
 import type { CollectionEntry } from 'astro:content';
+// MarkdownHeading 从 'astro' 拿，不是 'astro:content'（Astro 7 实测：
+// 后者没有这个导出，astro check 会报 ts(2305)）。
+import type { MarkdownHeading } from 'astro';
+import { Image } from 'astro:assets';
 import BaseLayout from './BaseLayout.astro';
 import TagList from '../components/TagList.astro';
-import {
-  SITE_NAME,
-  SITE_URL,
-  GITHUB_URL,
-} from '../site.config';
+import TableOfContents from '../components/TableOfContents.astro';
+import { SITE_NAME, SITE_URL, GITHUB_URL } from '../site.config';
 import { readingStats, formatCount } from '../lib/reading-time';
+import { postHref, isArchivedPost, type Post } from '../lib/posts';
 
 interface Props {
   post: CollectionEntry<'posts'>;
+  /** 由 Astro 的 rehypeHeadingIds 生成，页面从 render() 里取来交给这里 */
+  headings: MarkdownHeading[];
+  /** 时间上更早 / 更晚的一篇；两头为 undefined（见 lib/posts.ts 的约定） */
+  older?: Post;
+  newer?: Post;
 }
 
-const { post } = Astro.props;
+const { post, headings, older, newer } = Astro.props;
 
 const slug = post.data.slug ?? post.id;
 const canonical = new URL(`/posts/${slug}/`, SITE_URL).toString();
+/** 本页自己的分享卡片，构建期烘好（见 src/pages/og/[slug].png.ts） */
+const ogImage = new URL(`/og/${slug}.png`, SITE_URL).toString();
 
 // 字数与阅读时间：从原始 Markdown 现算，不手写进 frontmatter
 // （手写就会出现"忘了改"的第二真相源）。
@@ -30,7 +39,12 @@ const fmt = new Intl.DateTimeFormat('zh-CN', {
 });
 ---
 
-<BaseLayout title={post.data.title} description={post.data.description}>
+<BaseLayout
+  title={post.data.title}
+  description={post.data.description}
+  ogImage={ogImage}
+  ogImageAlt={post.data.title}
+>
   <!--
     代码块用的自托管等宽字体。**只在文章页 preload**——首页/归档/标签页没有
     代码块，没必要让它们白下载这 21 KB。crossorigin 是字体 preload 的必需项
@@ -64,13 +78,41 @@ const fmt = new Intl.DateTimeFormat('zh-CN', {
       author: { '@type': 'Person', name: SITE_NAME, url: GITHUB_URL },
       publisher: { '@type': 'Person', name: SITE_NAME, url: GITHUB_URL },
       mainEntityOfPage: canonical,
+      image: ogImage,
       keywords: post.data.tags?.join(', '),
       inLanguage: 'zh-CN',
     })}
   />
 
   <article>
+    <!--
+      已归档横幅。刻意放在**标题之前**：读者在读到第一行正文前就该知道
+      "这篇不再更新、结论可能过时"，而不是读完才发现。
+      判据是"文件在不在 archive/ 目录里"，不读 frontmatter
+      （见 content.config.ts 末尾与 lib/posts.ts 的 isArchivedPost）。
+    -->
+    {
+      isArchivedPost(post) && (
+        <p class="article-flag">
+          <strong>已归档</strong>
+          ：这篇内容保留在原处且外链有效，但<strong>不再更新</strong>，
+          其中的结论可能已随版本变化而过时。
+        </p>
+      )
+    }
+
     <header class="article-header">
+      {
+        post.data.cover && (
+          <Image
+            class="article-cover"
+            src={post.data.cover}
+            alt={post.data.coverAlt ?? ''}
+            loading="eager"
+          />
+        )
+      }
+
       <h1 class="article-title">{post.data.title}</h1>
       <p class="article-meta">
         <time datetime={post.data.pubDate.toISOString()}>
@@ -96,10 +138,40 @@ const fmt = new Intl.DateTimeFormat('zh-CN', {
       <TagList tags={post.data.tags} />
     </header>
 
+    <TableOfContents headings={headings} />
+
     <div class="prose">
       <slot />
     </div>
   </article>
+
+  <!--
+    上一篇 / 下一篇。读完一篇后原本无处可去、只能回列表重找。
+    约定（与 lib/posts.ts 同源）：上一篇 = 时间上更早，下一篇 = 时间上更晚；
+    首篇/末篇各自少一侧，不留死链。
+  -->
+  <nav class="post-nav" aria-label="相邻文章">
+    {
+      older ? (
+        <a class="post-nav__link" href={postHref(older)} rel="prev">
+          <span class="post-nav__label">← 上一篇（更早）</span>
+          <span class="post-nav__title">{older.data.title}</span>
+        </a>
+      ) : (
+        <span class="post-nav__empty" />
+      )
+    }
+    {
+      newer ? (
+        <a class="post-nav__link post-nav__link--next" href={postHref(newer)} rel="next">
+          <span class="post-nav__label">下一篇（更新）→</span>
+          <span class="post-nav__title">{newer.data.title}</span>
+        </a>
+      ) : (
+        <span class="post-nav__empty" />
+      )
+    }
+  </nav>
 
   <!--
     代码块装饰：给每个 pre.astro-code 包一层 figure.code-figure，

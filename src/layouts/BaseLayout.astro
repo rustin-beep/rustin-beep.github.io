@@ -12,9 +12,20 @@ import {
 interface Props {
   title: string;
   description?: string;
+  /**
+   * 分享卡片图（绝对地址）。默认站点卡片 `/og/site.png`（1200×630），
+   * 文章页传自己那张 `/og/<slug>.png`。
+   */
+  ogImage?: string;
+  ogImageAlt?: string;
 }
 
-const { title, description = SITE_DESCRIPTION } = Astro.props;
+const {
+  title,
+  description = SITE_DESCRIPTION,
+  ogImage = `${SITE_URL}/og/site.png`,
+  ogImageAlt = SITE_NAME,
+} = Astro.props;
 
 const pageTitle = title === SITE_NAME ? SITE_NAME : `${title} · ${SITE_NAME}`;
 const year = new Date().getFullYear();
@@ -33,18 +44,26 @@ const canonicalUrl = new URL(Astro.url.pathname, SITE_URL).toString();
 
     <!--
       Open Graph / Twitter Card。缺了这些，链接被分享到社交平台时只是一条裸 URL。
-      og:image 用头像直链（绝对地址、正方形）——**不是 OG 推荐的 1200×630**，
-      属"有比没有强"。要更正式得为每篇生成一张 1200×630 卡片图，见 PLAN 待办。
+
+      og:image 用**构建期烘的 1200×630 卡片**（/og/*.png），不再是正方形头像——
+      微信群 / Twitter / Slack 的卡片位是横图，正方形进去会被裁得只剩中间一条。
+      这里补上 width/height，让抓取方在下载图片前就知道比例、不必改版式。
+      twitter:card 相应从 summary 改成 summary_large_image（横图专用）。
     -->
     <meta property="og:type" content="website" />
     <meta property="og:title" content={pageTitle} />
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonicalUrl} />
-    <meta property="og:image" content={avatarUrl(180)} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content={ogImageAlt} />
     <meta property="og:locale" content="zh_CN" />
-    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content={pageTitle} />
     <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+    <meta name="twitter:image:alt" content={ogImageAlt} />
 
     <!-- 头像直链：GitHub 换头像，这里跟着换（见 src/site.config.ts） -->
     <link rel="icon" type="image/png" href={avatarUrl(64)} />

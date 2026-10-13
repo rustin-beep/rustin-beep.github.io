@@ -25,12 +25,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # og:image 卡片是构建期把 SVG 用 sharp 栅格化出来的，中文靠系统字体。
+      # ubuntu-latest 不保证带 CJK 字体（缺了会静默画出豆腐块），所以显式装。
+      # 兜底：src/lib/og-card.ts 的 assertCjkGlyphs() 会在开图前自检，
+      # 真缺字体就 fail loud，宁可构建红也不把豆腐块卡片发出去。
+      - name: Install CJK fonts for og:image
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+
       # withastro/action 内部依次做：setup-node（默认 Node 24，满足 Astro 7 的
       # Node ≥22.12）→ 安装依赖 → 跑 package.json 的 build 脚本 →
       # upload-pages-artifact 上传制品。
       #
       # 注意它跑的就是我们的 build 脚本，即 `astro build && pagefind --site dist`：
-      # **搜索索引在 CI 里一并产出**，不需要额外步骤。
+      # **搜索索引在 CI 里一并产出**，不需要额外步骤。og:image 也在这一步烘成静态 PNG。
       - name: Build with Astro
         uses: withastro/action@v6
 

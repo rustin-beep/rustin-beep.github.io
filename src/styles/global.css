@@ -512,6 +512,216 @@ main {
   margin-inline: var(--space-1);
 }
 
+/* --- 文章目录（TOC）---
+   数据来自 Astro 内置 rehypeHeadingIds 已经算好的 headings 数组，
+   组件只做筛选与渲染。刻意不装 rehype-slug（两套 id 体系会错位）。
+   用原生 <details> 而非 JS 折叠：全站外链 JS 仍为 0。 */
+.toc {
+  margin-bottom: var(--space-6);
+}
+
+.toc__box {
+  border: 1px solid var(--color-surface-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  padding: var(--space-3) var(--space-4);
+}
+
+.toc__summary {
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--color-surface-muted);
+  letter-spacing: 0.04em;
+  list-style: none;
+}
+
+.toc__summary::-webkit-details-marker {
+  display: none;
+}
+
+/* 收起时给个可点的提示，不靠 JS */
+.toc__summary::before {
+  content: '▸ ';
+}
+
+.toc__box[open] .toc__summary::before {
+  content: '▾ ';
+}
+
+.toc__count {
+  color: var(--color-accent);
+  margin-left: var(--space-1);
+}
+
+.toc__list {
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--color-surface-border);
+  padding-top: var(--space-3);
+}
+
+.toc__item {
+  margin-block: var(--space-1);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+}
+
+/* h3 缩进一级：层级靠位置表达，不靠字号（字号一动就乱） */
+.toc__item--h3 {
+  padding-left: var(--space-4);
+}
+
+.toc__item a {
+  color: var(--color-surface-muted);
+  text-decoration: none;
+}
+
+/* 目录（以及任何锚点）跳转时的落点留白：目标标题不要紧贴视口上沿。
+   配合 TableOfContents 的 scrollIntoView({block:'start'})。 */
+.prose h2,
+.prose h3,
+.prose h4 {
+  scroll-margin-top: var(--space-5);
+}
+
+.toc__item a:hover {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* --- 已归档横幅 / 标签 ---
+   横幅刻意放在正文之前：读者在读到第一行之前就该知道"这篇不再更新"。 */
+.article-flag {
+  margin: 0 0 var(--space-5);
+  padding: var(--space-3) var(--space-4);
+  border-left: 3px solid var(--color-accent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: var(--color-accent-subtle);
+  color: var(--color-surface-fg);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+}
+
+.badge {
+  display: inline-block;
+  margin-right: var(--space-2);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  background: var(--color-accent-subtle);
+  color: var(--color-accent);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  vertical-align: 1px;
+}
+
+/* --- 封面图（frontmatter 的 cover，走 Astro 图片管线）--- */
+.article-cover {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-bottom: var(--space-5);
+  border: 1px solid var(--color-surface-border);
+  border-radius: var(--radius);
+}
+
+/* --- 上一篇 / 下一篇 --- */
+.post-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+  margin-top: var(--space-7);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--color-surface-border);
+}
+
+.post-nav__link {
+  display: block;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-surface-border);
+  border-radius: var(--radius);
+  text-decoration: none;
+}
+
+.post-nav__link--next {
+  text-align: right;
+}
+
+.post-nav__link:hover {
+  border-color: var(--color-accent);
+}
+
+.post-nav__label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--color-surface-muted);
+  margin-bottom: var(--space-1);
+}
+
+.post-nav__title {
+  display: block;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+  color: var(--color-surface-fg);
+}
+
+.post-nav__link:hover .post-nav__title {
+  color: var(--color-accent);
+}
+
+/* --- 归档页：现存 / 已归档 两组 --- */
+.archive-lead {
+  margin: 0 0 var(--space-5);
+  color: var(--color-surface-muted);
+  font-size: var(--fs-sm);
+}
+
+.archive-group {
+  margin-bottom: var(--space-6);
+}
+
+.archive-group__title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  padding-bottom: var(--space-2);
+  border-bottom: 2px solid var(--color-accent);
+  font-size: var(--fs-lg);
+}
+
+.archive-group__count {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--color-surface-muted);
+}
+
+/* 已归档这一组用虚线与说明把它和"现存"从视觉上隔开——
+   分组不能只靠标题文字，否则扫一眼仍然分不出来。 */
+.archive-group--archived {
+  margin-top: var(--space-7);
+  padding-top: var(--space-4);
+  border-top: 1px dashed var(--color-surface-border);
+}
+
+.archive-group--archived .archive-group__title {
+  border-bottom-style: dashed;
+  border-bottom-color: var(--color-surface-border);
+  color: var(--color-surface-muted);
+}
+
+.archive-group__note {
+  margin: 0 0 var(--space-4);
+  color: var(--color-surface-muted);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-snug);
+}
+
 /* --- 窄屏 --- */
 @media (max-width: 48rem) {
   /* 页头挤不下时优先让出 @handle（信息量最低的一个） */
@@ -527,5 +737,15 @@ main {
 
   main {
     padding: var(--space-5) var(--space-4);
+  }
+
+  /* 窄屏下上一篇/下一篇竖排：两栏挤在 390px 里每栏只剩一半宽，
+     标题会折成三行且互相参差。 */
+  .post-nav {
+    grid-template-columns: 1fr;
+  }
+
+  .post-nav__link--next {
+    text-align: left;
   }
 }

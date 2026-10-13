@@ -1,13 +1,13 @@
 ---
-import { getCollection } from 'astro:content';
 import BaseLayout from '../layouts/BaseLayout.astro';
 import PostCard from '../components/PostCard.astro';
 import { SITE_NAME, SITE_DESCRIPTION } from '../site.config';
+import { allPublishedPosts, isCurrentPost } from '../lib/posts';
 
-// getCollection() 的返回顺序是非确定的（平台依赖）——必须自己 sort
-const posts = (await getCollection('posts', ({ data }) => !data.draft)).sort(
-  (a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf(),
-);
+// 首页是"最新文章"入口 —— 只列**现存**的（未归档）。
+// 已归档的仍然存在、外链仍有效，只是不再从"最新"这里推荐出去；
+// 它们在 /archive 的"已归档"分组里，以及标签页 / 搜索 / RSS 里都还在。
+const posts = (await allPublishedPosts()).filter(isCurrentPost);
 ---
 
 <BaseLayout title={SITE_NAME} description={SITE_DESCRIPTION}>
