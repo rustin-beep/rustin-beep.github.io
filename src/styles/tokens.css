@@ -32,16 +32,30 @@
     'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
   --font-mono:
     'JetBrains Mono', ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas,
-    'Liberation Mono', 'Noto Sans Mono CJK SC', monospace;
+    'Liberation Mono',
+    /* CJK 回退必须显式接在拉丁等宽之后。
+       JetBrains Mono 的 latin 子集**不含汉字**，代码注释里的中文若不指定回退，
+       浏览器会自行挑一个默认等宽 CJK——Windows 上常见的是宋体一类的衬线，
+       与正文的无衬线中文明显不是一家人，看起来就像"代码框里还是系统字体"。
+       这里接上与 --font-sans 同一套无衬线，中文注释与正文同族。
+       代价：中文在代码里不再等宽（本就不是等宽，此前亦然）。 */
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC',
+    'Noto Sans Mono CJK SC', monospace;
 
-  /* --- 字号阶梯 --- */
-  --fs-xs: 0.8125rem; /* 13px  元信息 */
-  --fs-sm: 0.875rem; /* 14px  辅助 */
-  --fs-base: 1.0625rem; /* 17px  正文 */
-  --fs-lg: 1.25rem; /* 20px  h4 */
-  --fs-xl: 1.5rem; /* 24px  h3 */
-  --fs-2xl: 1.875rem; /* 30px  h2 */
-  --fs-3xl: 2.25rem; /* 36px  文章标题 */
+  /* --- 字号阶梯：流式，两个自变量同时生效 ---
+     形式 clamp(min, preferred, max)：
+       · min / max 用 rem  ⇒ 仍随**浏览器默认字号**缩放（用户调大字号，全站跟着大）
+       · preferred 里的 vw ⇒ 随**视口宽度**变化（手机小、桌面大）
+     所以既不是写死的 px，也不是只认一端：窄屏收敛到 min，宽屏收敛到 max，
+     中间线性过渡。实测范围约 400px（手机）→ 1440px（桌面）。
+     不要改回固定 rem——那会让手机和桌面用同一物理字号。 */
+  --fs-xs: clamp(0.75rem, 0.71rem + 0.2vw, 0.8125rem); /* 12px → 13px 元信息 */
+  --fs-sm: clamp(0.8125rem, 0.77rem + 0.25vw, 0.875rem); /* 13px → 14px 辅助 */
+  --fs-base: clamp(1rem, 0.94rem + 0.14vw, 1.0625rem); /* 16px → 17px 正文 */
+  --fs-lg: clamp(1.125rem, 1.03rem + 0.35vw, 1.25rem); /* 18px → 20px h4 */
+  --fs-xl: clamp(1.3125rem, 1.18rem + 0.5vw, 1.5rem); /* 21px → 24px h3 */
+  --fs-2xl: clamp(1.5rem, 1.32rem + 0.7vw, 1.875rem); /* 24px → 30px h2 */
+  --fs-3xl: clamp(1.75rem, 1.45rem + 0.9vw, 2.25rem); /* 28px → 36px 文章标题 */
 
   /* --- 行高：中文比英文松 --- */
   --lh-tight: 1.25;

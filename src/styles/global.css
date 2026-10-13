@@ -295,6 +295,19 @@ main {
   border-radius: 0;
 }
 
+/* ★ 必需，删了代码块就退回系统字体。
+   Shiki 输出的是 <pre class="astro-code"><code>…</code></pre>，
+   而浏览器的 **UA 样式表给 `code` 单独设了 `font-family: monospace`**——
+   它**不继承** `pre` 的字体。只把 --font-mono 写在 .astro-code 上，
+   字体落不到真正装文字的那个 <code> 里，文字实际渲染成 generic `monospace`
+   （Windows 上可能是 Courier New 这类**带衬线**的等宽，观感与行内代码完全不同）。
+   行内代码因为 .prose code:not(pre code) 显式设过 font-family，反而是对的——
+   于是表现为"代码框里和正文里不是一种字体"。
+   2026-10-13 用户反馈两次后才实测定位（前一次我量了 pre 而非 code，误判为没问题）。 */
+.astro-code code {
+  font-family: inherit;
+}
+
 /* 浅色：Shiki 把**首个**主题写进 inline color，所以只覆盖背景、不碰 color。
    深色：token 颜色走 --shiki-dark，覆盖 color 即可。
 

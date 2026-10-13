@@ -3,6 +3,7 @@ import '../styles/global.css';
 import {
   SITE_NAME,
   SITE_DESCRIPTION,
+  SITE_URL,
   GITHUB_HANDLE,
   GITHUB_URL,
   avatarUrl,
@@ -17,6 +18,9 @@ const { title, description = SITE_DESCRIPTION } = Astro.props;
 
 const pageTitle = title === SITE_NAME ? SITE_NAME : `${title} · ${SITE_NAME}`;
 const year = new Date().getFullYear();
+
+// 本页的绝对地址。分享卡片与 canonical 都用它，避免各处重复拼。
+const canonicalUrl = new URL(Astro.url.pathname, SITE_URL).toString();
 ---
 
 <!doctype html>
@@ -27,11 +31,31 @@ const year = new Date().getFullYear();
     <title>{pageTitle}</title>
     <meta name="description" content={description} />
 
+    <!--
+      Open Graph / Twitter Card。缺了这些，链接被分享到社交平台时只是一条裸 URL。
+      og:image 用头像直链（绝对地址、正方形）——**不是 OG 推荐的 1200×630**，
+      属"有比没有强"。要更正式得为每篇生成一张 1200×630 卡片图，见 PLAN 待办。
+    -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={pageTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonicalUrl} />
+    <meta property="og:image" content={avatarUrl(180)} />
+    <meta property="og:locale" content="zh_CN" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content={pageTitle} />
+    <meta name="twitter:description" content={description} />
+
     <!-- 头像直链：GitHub 换头像，这里跟着换（见 src/site.config.ts） -->
     <link rel="icon" type="image/png" href={avatarUrl(64)} />
     <link rel="apple-touch-icon" href={avatarUrl(180)} />
     <!-- rel=me：声明本站在 GitHub 上的同一身份 -->
     <link rel="me" href={GITHUB_URL} />
+
+    <!-- 机器可读指针：llms.txt 索引。robots.txt 里那条只是注释，不构成可执行指令，
+         这里给一个 head 级 link，抓取方顺着 <head> 就能发现。 -->
+    <link rel="alternate" type="text/plain" href="/llms.txt" title="站点索引（llms.txt）" />
+
     <link rel="sitemap" href="/sitemap-index.xml" />
 
     <!-- 防首屏主题闪烁：必须在 body 渲染前确定 data-theme -->

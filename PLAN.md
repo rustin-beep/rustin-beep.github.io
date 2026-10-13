@@ -240,6 +240,49 @@ figure.code-figure
 之前那条纪律针对的是**中文**字体（数 MB 量级）。编码字体只需 latin 子集，
 **21 KB 与全站 CSS（8 KB）同一量级**——不是同一类东西。
 
+### ★★ 真根因：UA 样式表给 `code` 单设了 `font-family: monospace`（2026-10-13）
+
+**症状**：用户报"代码框里的还是系统字体，外部的不是"、"代码框里的和正文的就不是一种
+字体，你看 `@` 就可以分辨出来了"。
+
+**我第一轮判断错了**：我量了 `pre` 的 computed `font-family`，看到
+`"JetBrains Mono"` 就下结论"字体一直生效、问题在中文回退"。**那是测错了元素**——
+文字不在 `pre` 上，在它内部的 `<code>` 里。用户第二次反馈后做了四元素实测才定位：
+
+| 元素 | 修复前 | 修复后 |
+|---|---|---|
+| `pre.astro-code` | `"JetBrains Mono", …` ✓ | 同 |
+| **`pre > code`** | **`monospace`** ✗ | `"JetBrains Mono", …` ✓ |
+| `pre > code > span` | `monospace` ✗ | `"JetBrains Mono", …` ✓ |
+| `.prose code:not(pre code)` | `"JetBrains Mono", …` ✓ | 同 |
+
+**根因**：Shiki 输出 `<pre class="astro-code"><code>…</code></pre>`，而
+**浏览器 UA 样式表给 `code` 单独设了 `font-family: monospace`，它不继承 `pre`**。
+只把 `--font-mono` 写在 `.astro-code`（`pre`）上，字体根本落不到装文字的 `<code>`，
+文字实际渲染成 generic `monospace`——Windows 上可能是 **Courier New 这类带衬线的
+等宽**，所以用户看到的是"衬线感"的系统字体。行内代码因为
+`.prose code:not(pre code)` 显式设过，反而是对的 ⇒ 两者不同族。
+
+**修法**：`.astro-code code { font-family: inherit; }`（一行，但删了代码块就退回系统字体）。
+
+**教训（比这个 bug 本身重要）**：
+- **"看到 computed style 是想要的字体"不等于"文字用的就是这个字体"**——
+  必须量**真正装文字的那层元素**。
+- UA 样式表会**阻断继承**：给容器设 `font-family` 时，容器内若有 `code` / `pre` /
+  `textarea` / `input` 等被 UA 设过字体的元素，**必须单独覆盖**。
+- 用户说"看起来不对"时，先怀疑自己的验证方法，别急着解释成用户对现象的误读。
+
+### 附带修正：CJK 回退项（同一轮发现，独立成立）
+
+排掉根因后顺带确认了另一件事，**它本身是对的、也保留**：mono 栈里的 CJK 回退
+原来只写了 `'Noto Sans Mono CJK SC'` → `monospace`，用户机器上没装时浏览器会静默
+滑到 generic `monospace`。现已显式接上 `--font-sans` 同一套无衬线，
+代码注释里的中文与正文同族。
+
+> **教训**：字体栈里的 CJK 回退项不能随手写。写了等宽 CJK 而用户没装，
+> 浏览器就静默滑到 generic，结果逐机器不一致——**这正是"我这边看着对、
+> 你那边看着错"的来源**。
+
 ### 一条要提前知道的默认行为
 
 JetBrains Mono **默认开启连字**（`calt`）：`->` 显示成 `→`、`!=` 显示成 `≠`、
@@ -260,6 +303,54 @@ JetBrains Mono **默认开启连字**（`calt`）：`->` 显示成 `→`、`!=` 
 > 顺带记录：**Vitro 仓库里没有任何字体文件**，其 `demo/tokens.css` 用的是系统栈
 > `ui-monospace, "Cascadia Code", Consolas, "Microsoft YaHei UI"`。
 
+## 六之六、流式字号（2026-10-13）
+
+字号阶梯从固定 rem 改成 `clamp(min, preferred, max)`，**两个自变量同时生效**：
+
+- `min` / `max` 用 **rem** ⇒ 仍随**浏览器默认字号**缩放（用户调大字号，全站跟着大）
+- `preferred` 里的 **`vw`** ⇒ 随**视口宽度**变化（手机小、桌面大）
+
+实测（截图留 `preview/fluid-*.png`）：375px 手机 → 正文 16px；1440px 桌面 → 17px；
+再叠加"用户默认字号调到 24px"仍**整体等比放大**——两件事不互斥，`clamp` 里 rem 那一半
+保证了后者。
+
+**纪律：不要改回固定 rem。** 固定 rem 会让手机与桌面用同一个物理字号，
+窄屏下不缩、宽屏下不增。
+
+## 六之七、面向 AI 的文章设计（2026-10-13）
+
+目标：让 agent / LLM 用**最省事**的方式拿到一篇的纯文本与元数据，
+不必走"抓 HTML → 去标签 → 猜哪块是正文 → 去导航"这一整套。
+
+四件产物，**全部从内容集合实时生成**（不存在"忘了更新"的第二真相源）：
+
+| 产物 | 路径 | 作用 |
+|---|---|---|
+| `llms.txt` | `/llms.txt` | 按 llmstxt.org 约定生成的全站索引：每篇标题 / URL / 摘要 + 原始 Markdown 直链 |
+| 原始 Markdown | `/posts/<slug>.md` | 文章纯 Markdown，头部补最小 frontmatter（标题/日期/标签/**canonical**） |
+| JSON-LD | 文章页 `<head>` | `schema.org BlogPosting`：标题/日期/作者/标签，不必从正文猜 |
+| head 级指针 | 站点 `<head>` | `<link rel="canonical">`、`<link rel="alternate" type="text/plain" href="/llms.txt">`、`rel="me"` |
+
+`robots.txt` 里指向 sitemap 并提及 llms.txt——但**那只是注释、不是可执行指令**，
+所以另加了 head 级 `alternate` link 作为机器可读的发现路径。
+
+**新增的两条坑**（都被门禁抓到，见 §七 表 12/13）：
+`post.body` 会把 MDX 的 `import X from '…'` 带进 Markdown；以及新端点文件必须过
+`astro check`。
+
+## 六之八、阅读统计与分享卡片（2026-10-13）
+
+- **字数与阅读时间**：`src/lib/reading-time.ts` 从 `post.body` **现算**，不写进
+  frontmatter——手写必然出现"忘了改"的第二真相源。文章元信息行显示
+  `2026/10/12 · 409 字 · 约 2 分钟`。
+  **刻意排除代码块与行内代码**：代码是"看"不是"读"，把 `=>`、`nullptr`、大括号
+  都算进字数会显著虚高。代价是纯代码长文会低估，技术博客里这个取舍更划算。
+  速率取中文 400 字/分、英文 250 词/分。
+- **Open Graph / Twitter Card**：此前**完全没有**，链接分享出去是一条裸 URL。
+  现在 `og:type/title/description/url/image/locale` + `twitter:card` 齐了。
+  `og:image` 直接用头像直链——**是正方形、不是 OG 推荐的 1200×630**，
+  属"有比没有强"。要更正式须为每篇生成 1200×630 卡片图（见 §十二 待办）。
+
 ## 七、踩过的坑（写进代码注释，不重复踩）
 
 | # | 坑 | 处置 |
@@ -275,6 +366,10 @@ JetBrains Mono **默认开启连字**（`calt`）：`->` 显示成 `→`、`!=` 
 | 9 | **Sätteri 的 `features.math` 默认 `false`**；不开启时 `$..{x}..$` 会被 MDX 当 JSX 表达式，`ReferenceError: x is not defined` ⇒ **整页构建失败**（不是"不渲染"这么温和） | 见 §六之三 |
 | 10 | **开了 math 也只是标记、不排版**：产物为 `<code class="language-math math-inline">原始 LaTeX</code>` | 需自挂渲染器，见 §六之三 |
 | 11 | `astro preview` 开着时构建会 `EBUSY: rmdir dist/.prerender/chunks`（预览服务占住 dist 句柄），**与代码无关** | 构建前先停预览服务 |
+| 12 | **`post.body` 会把 MDX 的 `import X from '…'` 原样带进原始 Markdown**——MDX 专用语法，在 `.md` 里是噪声且相对路径失效 | 取正文时按行剔除该形态，并折叠多余空行 |
+| 13 | 新端点（`llms.txt.ts` 等）也过 `astro check`：未使用的 import 判警告、`.filter()` 参数不标注则 ts(7006) 隐式 any 判**错误** | 标注参数类型、删无用 import。**门禁是全绿硬门槛** |
+| 14 | **UA 样式表给 `code` 单设 `font-family: monospace`，不继承 `pre`** ⇒ 只把字体写在 `pre`（`.astro-code`）上，文字仍渲染成 generic `monospace`；而显式设过的行内 `code` 反而是对的 ⇒ "代码框与正文不同字体" | **必须加 `.astro-code code { font-family: inherit; }`**。同族风险：`pre` / `textarea` / `input` / `kbd` / `samp` |
+| 15 | 验证字体别量错层：`pre` 的 computed `font-family` 正确**不代表**文字用它——文字在 `<code>` 里 | 量**真正装文字的那一层**；必要时逐层打印 `pre` / `code` / `span` |
 
 ## 八、质量门禁
 
@@ -354,8 +449,39 @@ CSS 单文件 9236 字节（未压缩）。**外链 JS 恒为 0**——没有运
 - [x] 依赖安装、`astro check`、`astro build` 全部跑通（见第九节实测）
 - [x] `site` 字段改为真实地址（由 `site.config.ts` 的 `SITE_URL` 提供）
 - [x] 部署到 GitHub Pages（见第十一节）
+- [x] 代码字体接入（见 §六之五）
+- [x] 字号改流式，同时随浏览器字号与屏幕宽度（见 §六之六）
 - [ ] **浏览器实跑一遍交互**：复制按钮、主题切换、搜索（已截图看过渲染，但这三项的
       点击行为仍未验证）
 - [ ] 数学公式渲染器未接（见 §六之三）
 - [ ] 中英混排的 `text-autospace` 实际效果需在浏览器里看一眼再定
 - [ ] 自定义域名？（若要，改 `SITE_URL` + 仓库 Pages 设置 + DNS）
+- [ ] **本地已改但未提交**：本轮（流式字号 + 面向 AI 的文章设计 + 阅读统计 + 分享卡片）
+      改动未经用户允许不得提交，见 §十三
+
+### 审计出的缺口（2026-10-13 盘点，均未做）
+
+按"缺了会明显影响使用"排序：
+
+| # | 缺的东西 | 为什么算缺 |
+|---|---|---|
+| 1 | **文章目录（TOC）** | Astro 已经把 `headings` 数组算好并交给布局（含 id 与层级），**当前一处没用——是死数据**。长文没有目录，只能一路滚 |
+| 2 | **上一篇 / 下一篇** | 读完一篇无处可去，只能回列表页重找。集合里排序信息现成，成本很低 |
+| 3 | **`og:image` 1200×630 卡片图** | 现在拿头像（正方形）顶替。微信群/Twitter 的卡片会裁得很难看。可构建期用 SVG→PNG 生成 |
+| 4 | **正文里的图片支持** | 内容 schema 没接 Astro 的图片处理；将来插图会走原生 `<img>`，**没有尺寸、没有懒加载、没有响应式**，是 CLS 的直接来源 |
+| 5 | **阅读进度条** | 长文体感辅助。非必需，但成本低 |
+| 6 | **评论** | 需要后端或第三方（如 giscus），涉及外部依赖与隐私取舍，**须用户先拍板** |
+
+**明确不做**（记录以免反复讨论）：
+
+- **数学公式渲染器**：已有结构方案（KaTeX MathML，构建期、零运行时），
+  当前无公式文章，**等真有需求再接**（见 §六之三）。
+- **站内外链的 hover 预览、回到顶部按钮、站内搜索的键盘导航**：锦上添花，
+  与"零外链 JS"的取舍冲突，不做。
+
+## 十三、提交纪律（2026-10-13 用户明令）
+
+**未经用户明确允许，禁止 `git commit` 与 `git push`。**
+
+2026-10-13 早先那两次提交推送是用户在当轮明确要求的；此后用户撤回该授权，
+改为逐次许可。**agent 不得把"上次让提交过"当成持续授权。**

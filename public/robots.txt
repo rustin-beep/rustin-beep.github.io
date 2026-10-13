@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+
+# 站点地图
+Sitemap: https://rustin-beep.github.io/sitemap-index.xml
+
+# 给 LLM / agent 的索引（llms.txt 约定）
+# 每篇文章另有原始 Markdown 版本，见 llms.txt 内的链接
+# https://rustin-beep.github.io/llms.txt

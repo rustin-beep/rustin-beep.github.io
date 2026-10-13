@@ -2,12 +2,26 @@
 import type { CollectionEntry } from 'astro:content';
 import BaseLayout from './BaseLayout.astro';
 import TagList from '../components/TagList.astro';
+import {
+  SITE_NAME,
+  SITE_URL,
+  GITHUB_URL,
+} from '../site.config';
+import { readingStats, formatCount } from '../lib/reading-time';
 
 interface Props {
   post: CollectionEntry<'posts'>;
 }
 
 const { post } = Astro.props;
+
+const slug = post.data.slug ?? post.id;
+const canonical = new URL(`/posts/${slug}/`, SITE_URL).toString();
+
+// 字数与阅读时间：从原始 Markdown 现算，不手写进 frontmatter
+// （手写就会出现"忘了改"的第二真相源）。
+// 代码块被排除在统计外，理由见 lib/reading-time.ts。
+const stats = readingStats(post.body ?? '');
 
 const fmt = new Intl.DateTimeFormat('zh-CN', {
   year: 'numeric',
@@ -31,6 +45,30 @@ const fmt = new Intl.DateTimeFormat('zh-CN', {
     crossorigin
   />
 
+  <link slot="head" rel="canonical" href={canonical} />
+
+  <!--
+    结构化元数据（schema.org BlogPosting）。给解析 JSON-LD 的 agent/搜索引擎用，
+    不必从正文里猜标题、日期、作者、标签。放在 head 具名插槽里。
+  -->
+  <script
+    slot="head"
+    type="application/ld+json"
+    set:html={JSON.stringify({
+      '@context': 'https://schema.org',
+      '@type': 'BlogPosting',
+      headline: post.data.title,
+      description: post.data.description,
+      datePublished: post.data.pubDate.toISOString(),
+      dateModified: (post.data.updatedDate ?? post.data.pubDate).toISOString(),
+      author: { '@type': 'Person', name: SITE_NAME, url: GITHUB_URL },
+      publisher: { '@type': 'Person', name: SITE_NAME, url: GITHUB_URL },
+      mainEntityOfPage: canonical,
+      keywords: post.data.tags?.join(', '),
+      inLanguage: 'zh-CN',
+    })}
+  />
+
   <article>
     <header class="article-header">
       <h1 class="article-title">{post.data.title}</h1>
@@ -46,6 +84,14 @@ const fmt = new Intl.DateTimeFormat('zh-CN', {
             </span>
           )
         }
+        <span>
+          {' '}
+          · {formatCount(stats.cjk)} 字
+        </span>
+        <span>
+          {' '}
+          · 约 {stats.minutes} 分钟
+        </span>
       </p>
       <TagList tags={post.data.tags} />
     </header>
