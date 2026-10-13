@@ -100,6 +100,15 @@ body {
   display: flex;
   align-items: center;
   gap: var(--space-4);
+  /* 窄屏 + 大根字号下放行换行。2026-10-13 实测：没有这条时，24px 根字号下
+     按钮总宽 381px > 容器可用 354px，nav.site-nav right=399.3、
+     documentElement.scrollWidth 390 → 399，整页横溢 9px。
+     外层 .site-header .container 自己有 flex-wrap，但 nav 是单个弹性项、
+     内部不换行就断不开——所以得让它自己也能换。 */
+  flex-wrap: wrap;
+  /* 换行成多行时每行仍靠右，与桌面端单行的右对齐观感一致。
+     不换行时盒子由内容定宽、没有剩余空间，这条不产生任何变化。 */
+  justify-content: flex-end;
 }
 
 .site-nav a {
@@ -210,6 +219,16 @@ main {
 }
 
 .prose table {
+  /* 窄屏不给表格撑破页面：内容放不下时**表格自己横向滚动**，而不是把整页拉宽。
+     2026-10-13 实测的病：`.prose > *` 给了 max-width，但没有 `table` 的兜底，
+     6 列宽表的 min-content（538px）远超手机内容列（364px）⇒ 表格溢出父容器、
+     documentElement.scrollWidth 390 → 551，手机浏览器只好把整页缩放去"塞下"，
+     于是正文变小、表格被挤成"表头每行一个字 + 大片空白"的假象（用户截图）。
+     display:block 让 table 变成滚动容器；它内部的匿名表格仍按 auto 布局，
+     放得下时照旧占满整列、放不下才出滚动条——两态都由浏览器算，没有魔法数。
+     刻意不包一层 <div>：本站外链 JS 恒为 0，能用 CSS 就不引运行时。 */
+  display: block;
+  overflow-x: auto;
   border-collapse: collapse;
   width: 100%;
   font-size: var(--fs-sm);
