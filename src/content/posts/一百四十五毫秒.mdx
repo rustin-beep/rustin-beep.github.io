@@ -1,0 +1,834 @@
+---
+title: "一百四十五毫秒"
+description: "一台 Strix Halo、三个模型、五个缺口。三十小时里我把 ROCm 装进了 Windows，也把自己测过的每一个数字重新测了一遍。"
+pubDate: 2026-10-13
+slug: '145-milliseconds'
+tags:
+  - 本地推理
+  - Strix Halo
+  - ROCm
+  - HIP
+  - 编译器
+  - 语料
+draft: false
+---
+
+import Callout from '../../components/Callout.astro';
+
+> 过程实录，非裁定。全部数字来自本机亲跑；性能数字一律在 agent 会话外采集（Windows 计划任务 + 延时触发器，七轮丢首轮取中位）。关联探针记录 [#73](https://github.com/rustin-beep/Vitro/issues/73) / 缺口登记 [#75](https://github.com/rustin-beep/Vitro/issues/75) / [#76](https://github.com/rustin-beep/Vitro/issues/76)。
+
+<Callout type="note" title="关于 Vitro">
+  文中反复出现的 `vitro` 不是现成工具，是我自己的项目 **Vitro** ——
+  一个**教学 C 子集参考执行引擎**：Lexer → Parser → TypeChecker → BytecodeGen → VM
+  全链路由 MoonBit 自研，以 **Clang 为行为基准**逐字节诚实对拍，出口收敛为
+  wasm-gc 单出口多宿主，招牌能力是"每步可回放"。本文喂给它的
+  `--backend wasm` / `--backend native` 就是它的两条臂，"双臂不一致"因此被定为
+  最高严重度的独立桶（见 §七）。
+  仓库：[github.com/rustin-beep/Vitro](https://github.com/rustin-beep/Vitro)（MIT 许可）
+  · [在线 demo](https://rustin-beep.github.io/Vitro/)：浏览器里直接调 wasm-gc 出口
+</Callout>
+
+---
+
+原文从那个凌晨开始。
+
+凌晨一点四十，我把 `vitro.exe` 单独跑了一遍。一百四十三点五毫秒。
+
+这个数字我没怀疑过。因为它是跑出来的，不是我猜的。跑了很多次，每次都在一百四十三上下。
+
+后来我在普通窗口里跑了同一个东西。四点六毫秒。
+
+差的那些，不在机器里。在我这。
+
+## 一 · 一百四十五毫秒
+
+我说的是**进程创建的成本**。一个空进程，什么都不做，起一次，退一次。
+
+我先量了一个不做事的东西：
+
+```text
+cmd /c exit      12.1 ms
+```
+
+再量我的编译器：
+
+```text
+vitro.exe 直调   14.2 ms
+```
+
+差两点一毫秒。
+
+也就是说，**编一个 C 文件，引擎本身只值两毫秒**。前面那一百四十多毫秒，全是从会话里派生进程的税。
+
+这个税只在 agent 会话里存在。同一分钟，同一台机器，普通窗口里只要四到六毫秒（注意这是**另一条采集路线**：普通窗口的读数与下表"计划任务"路线不可直接相减，空进程只有在同一路线里量过才可比）。我一开始把它归到 Defender、归到 VBS、归到 HVCI——都归错了。那些东西两边完全一样。分开两边的只有一个：进程是不是从会话的进程树里派生出来的。
+
+我按别人早先记下的办法绕开它：把探针交给 **Windows 计划任务**跑，用**延时触发器**，让 Task Scheduler 服务自己去点火，不调 `Start-ScheduledTask`——那个会立刻启，被测进程会被 `0xC000013A` 杀掉，目标脚本连第一行都跑不完。编排器写 Python 不写 `.cmd`。完成信号写文件轮询，因为 PowerShell 的 stdout 常常不回显。七轮，丢首轮，取中位。
+
+改完之后，全部数字都要重来：
+
+| 项 | 会外 | 会话内（作废） |
+|---|---|---|
+| 空进程 | 12.1 ms | — |
+| `vitro.exe` 直调 | **14.2 ms** | 143.5 ms |
+| 经壳 `scripts/bin/vitro` | **526.7 ms** | 2500.8 ms |
+| clang | 41.6 ms | 192.8 ms |
+| gcc | 31.1 ms | 324.8 ms |
+
+我原先报过"壳比直调慢十七倍"。改用会外的数，是 **37.1 倍**。方向对了，数字错了，而且错的方向是**把差距缩小了**——因为两边都加了同一个税，税把比值压平了。
+
+壳为什么要慢五百毫秒，我找到了那一行：
+
+```sh
+find "$REPO/moonbit" -type f -name '*.mbt' -newermt "@$exe_mtime"
+```
+
+每次调用，全树扫一遍源码的修改时间，两千七百多个文件，为的是拦"用陈旧制品跑基准"这种事。**它是对的，不能删。** 只是批量的时候得绕开它，直接调臂二进制。
+
+**这些我能确定。**
+
+至于那两毫秒——我量了七轮，中位是十四点二，最小值十三点七，空进程是十二点一。两点一毫秒。我没有再去追问这两毫秒里有什么。也许那就是解析参数、读文件、走到 `main` 的价钱。
+
+## 二 · 机器
+
+我把一台机器当作容器来用。它得先能装得下东西。
+
+Ryzen AI Max+ 395，Strix Halo，Radeon 8060S，gfx1151，128 GB LPDDR5X-8000。理论上限 256 GB/s，实测约 215。
+
+我去 BIOS 里把 UMA 划到 96 GB。
+
+重启之后我拿 llama.cpp 去看设备，因为别的东西都不可信：
+
+```text
+Vulkan0: Radeon 8060S Graphics (114507 MiB, 108782 MiB free)
+```
+
+十一万四千五百零七 MiB。**一百一十一点八 GiB**。比我在 BIOS 里设的 96 GB 多出十六个。
+
+那十六个是共享的。96 dedicated 加约 16 shared。这台机器上所有说"96"的地方都不准，只有工具报出来的这个数准。WMI 更不准——`AdapterRAM` 恒报 4 GB，因为它是一个三十二位字段，装不下。
+
+代价在同一时刻发生，我一开始没看见：
+
+```text
+TotalPhysicalMemory : 31.6 GB
+FreePhysicalMemory  : 16.8 GB
+```
+
+**主机内存被压到三十一个半 G。**
+
+显存变多不是纯收益。这条后来咬了两次：一次是 `--n-cpu-moe` 不能用——把 MoE 的专家留在 CPU 上，意味着要往三十二 G 的主机内存里塞六十三个 G 的模型，必失败。另一次是所有 mmap 的行为都要重新想——页缓存吃的是主机内存，不是显存。
+
+然后我量速度。dense 27B Q4：
+
+```text
+GPU（Vulkan）   12.2 t/s
+CPU             3.35 t/s
+```
+
+三点六倍。核数吃不满带宽，这是统一内存机器的性格。
+
+MoE 35B-A3B Q4：**52 到 56 t/s**。
+
+这两组数告诉我一件事：**带宽是唯一的墙，容量不是。** 拿实测的 215 GB/s 去除以每 token 要读的权重字节——dense 70B Q4 是四十二个 G，除下来五点一；MoE 只激活 35B 里的约 3B 参数（Q4 下约一点七个 G），除下来一百二十几。所以这台机器上，dense 大模型没救，MoE 才有戏。
+
+引擎我先试了两个。同一台机、同一个模型、单流：
+
+```text
+llama.cpp   81.04 t/s
+vLLM        81.93 t/s
+```
+
+平手。vLLM 的优势全在并发——八个客户端的时候快百分之三十六。我不并发，我是顺序批量的。所以选 llama.cpp。
+
+后端的账也算过。同样是 35B-A3B 的 Q4：
+
+```text
+Vulkan（RADV）  60.4 t/s
+ROCm/HIP        49.6 t/s
+```
+
+到了 BF16 反过来：ROCm 二十三点七，Vulkan 十点七。**量化场景选 Vulkan，全精度场景选 ROCm。** 起初我以为是测错了，测了三遍，是这个数。
+
+至于 LM Studio，它的参数面是锁的。`chat_template_kwargs` 传不进去，我关不掉思考。所以我装了独立的 llama.cpp，build 号记下来，不写"最新"。
+
+## 三 · 引擎
+
+我一开始想换一个更快的引擎。
+
+我找了九个。这不是全部，但是我找得到的全部。（下面这些外部项目的形态是**写作时的读数**，不是永久事实——半年后大概会变。）
+
+**AMD EXTENSOR**，AMD 自己的包，说是把 MoE 的专家权重留在 SSD 上，用预测预取往内存里送。我看它的下载链接：
+
+```text
+extensor-v2.3.2-linux-x86_64-rocm7-gfx1151.zip
+```
+
+`linux`。它只有 Linux。
+
+**SnowLLM**，说是同一份 GGUF 上比 llama.cpp 解码快二点三倍、预填快九点四倍，Hugging Face 官方博客发的。我去看仓库：星星十个，fork 一个，issue 零。
+
+**Gufo**，MIT，开源，Flash-Next 上报 1628 pp / 59.4 tg。它支持 Qwen3.8-27B、Flash-Next、DeepSeek-V4-Flash——**支持列表里没有 35B-A3B**。而且只有 Linux。
+
+**Halogen**，预填一千四百二十四 t/s，这个数独立测过，是真的。但它是一个闭源二进制，装在容器里，只吃它自己那份权重。
+
+**halo-box/strix-llama.cpp**，仓库里调优项写得很细，连 ROCmFPx 量化都有。它的 release 里只有 `ubuntu-rocm-gfx1151` 和 `ubuntu-vulkan`。
+
+**FastFlowLM**，有 Windows 便携包，跑 NPU。它要 NPU 驱动不低于 `32.0.203.304`，我的是 `32.0.203.257`。
+
+**Kyojin**、**Ornith**、**QES**，Linux。
+
+还有 Ollama、LM Studio、koboldcpp——**它们不是替代，它们是 llama.cpp 的包装。**
+
+我在同一台机上看到别人做的对照，把四个 fork 都建了一遍，同一模型同一参数同一午后，结论是一句我不太想转述的话：**"none of them beats a tuned mainline llama.cpp here"**。宣传里说"官方版慢两倍"，是**没有调优**的口径。调优要的是 `--n-cpu-moe 30` 把 pinned GTT 压在四十六个 G，外加几个还没合进去的 PR。
+
+我原本还想找国产镜像换速度。hf-mirror 那次回：
+
+```text
+502 Bad Gateway
+Tunnel connection failed
+```
+
+它也走代理，代理挂了。
+
+**它们不是没用。它们是我的机器上跑不了。** 这两句不一样。
+
+然后我看到了那一句：**ROCm 10.0.0 起，官方支持 Windows，支持 gfx1151。**
+
+我一直在找一个好的引擎，而我最该做的是把墙里的引擎搬出来。
+
+## 四 · 数据
+
+要下的东西加起来一百零八点六三 GiB。
+
+```text
+ROCm gfx1151 tarball                     1.54 GiB
+gpt-oss-120b UD-Q4_K_XL（两个分片）      58.69 GiB
+gemma-4-26B-A4B UD-Q4_K_XL               15.84 GiB
+gpt-oss-20b MXFP4                        11.28 GiB
+Qwen3.6-35B-A3B MTP 版                   21.28 GiB
+```
+
+ROCm 那个包，官方页面上有三个：
+
+```text
+therock-dist-windows-multiarch-10.1.0.tar.gz    4.54 GiB
+therock-dist-windows-gfx1151-10.1.0.tar.gz      1.54 GiB
+```
+
+multiarch 是全集，gfx1151 是只要我这一份。**省三倍。** 直接取后者。
+
+它慢。我拿八条连接分片测，合计**零点五七 MiB/s**。多连接在它身上毫无用处，瓶颈在对面。省下的那三个 G，比什么优化都实在。
+
+下载这件事，我断了四次。
+
+第一次是电脑关机。第二次是我改完 BIOS 必须重启。第三次是对话被中止，而我把下载挂在 agent 的后台任务上——**它的进程在 agent 的进程树里，对话一断就被带走**。第四次是进程直接被杀了，`LastTaskResult` 是 `1073807364`，`0x40010004`，进程被终止。
+
+第四次之后我改了做法：**把下载交给计划任务**，一次点火，脱离会话，写完自己写 `DONE.txt`。任务里带**单实例锁**（`msvcrt` 的文件独占锁），带**断点续跑**，每项自己算 sha256 对账。
+
+坑还有一个：`AtStartup` 和 `AtLogOn` 这两种触发器**需要管理员权限**，我建不了。所以重启之后它不会自己回来，得重新点一次火。我把这个写成了一个 `.ps1` 放在旁边，双击就行。
+
+校验值这件事也走了弯路。hf-mirror 的接口回 403，huggingface.co 根本连不上。后来我发现 **ModelScope 的文件记录里自带 `Sha256` 字段**，就在同一个 JSON 里：
+
+```text
+Path   = gpt-oss-120b-UD-Q4_K_XL-00001-of-00002.gguf
+Size   = 49866326912
+Sha256 = c7b59d68c889ada280736d9b82685baeb6152f4d7423a169a369bb3492b3056e
+```
+
+我拿它和 Hugging Face 上的 LFS oid 对了一遍，一模一样。**镜像的数据是好的。**
+
+日志里有一行报过一个怪数：
+
+```text
+Downloading [...00001-of-00002.gguf]: 215GB
+```
+
+四十六个 G 的文件，modelscope 说二百一十五个 G。这是它进度条的显示 bug。**我没有把镜像个坏。**
+
+还有一个更细的坑。我自己写的分段下载器，一上来先发 HEAD 拿长度：
+
+```text
+!! HEAD 报 0 B，改用调用方给定的期望值 12109566624 B
+```
+
+ModelScope 的 `resolve` 端点对 HEAD 回 `Content-Length: 0`，分段基数算成零，除零崩掉。改成"HEAD 为零或不符就用调用方给的值"，就好了。**GET 加 Range 是好的，只有 HEAD 不可信。**
+
+速度上有一条我记下来：多连接有没有用，**是逐源而异的**。同一个文件，ModelScope 单连接 **7.17 MB/s**、八连接分段 **9.50 MB/s**（快三分之一）；而 AMD 的源上八连接只有 **0.57 MiB/s**（≈ 0.60 MB/s）。这两件事没有共同的答案，只能各测一遍。本地链路的上限是一百 Mbps，十二点五 MB/s。这是物理的。
+
+## 五 · 装机
+
+装之前，我把前提一条条核了：
+
+```text
+Windows        要 11 25H2          → 10.0.26200，DisplayVersion 25H2
+Adrenalin      要 26.8.1           → 装前是 32.0.21030.2001，得升
+Visual Studio  要 2022+            → 18 Community
+SAC 智能应用控制  要关              → VerifiedAndReputablePolicyState = 0，已经关了
+WDAG           要关                → 25H2 上已经没有这个东西了
+```
+
+SAC 那项我去注册表里看过，`0`。它以前是 `2`（评估中），现在是关的，不用动。WDAG 我去"启用或关闭 Windows 功能"里找，那个位置是空的——`Microsoft Defender Application Guard` 该在 `Internet Information Services` 和 `Microsoft NT 内核集成…` 中间，没有。微软把它弃用了。
+
+装完 Adrenalin 重启，驱动号从 `32.0.21030.2001` 变成 `32.0.31041.1004`。
+
+解压那份 tarball：
+
+```bash
+mkdir C:\opt\rocm
+tar -xzf therock-dist-windows-gfx1151-10.1.0.tar.gz -C C:\opt\rocm --strip-components=1
+```
+
+八个半 G。里面是 `bin`、`cmake`、`include`、`lib`、`libexec`、`share`。
+
+**我第一件要确认的不是它能不能跑，是它里面有没有编译器。**
+
+```text
+bin/hipcc.exe                      ✅
+lib/llvm/bin/amdclang.exe          ✅
+lib/llvm/bin/clang++.exe           ✅
+lib/amdhip64.lib  rocblas.lib      ✅
+bin/rocminfo.exe                   ❌  （Windows 上本来就只在 Linux 有）
+lib/llvm/bin/llc                   ❌  （hipconfig 会提示，实测不影响构建）
+```
+
+然后：
+
+```text
+$ hipcc --version
+HIP version: 7.16.26385
+AMD clang version 24.0.0git
+Target: x86_64-pc-windows-msvc
+```
+
+**一个能编译的完整 SDK。**
+
+后来我又单独看了设备：
+
+```text
+$ hipInfo
+device# 0   Name: Radeon 8060S Graphics
+            totalGlobalMem: 107.87 GB
+            clockRate: 2900 MHz
+            memoryBusWidth: 512
+            warpSize: 32
+```
+
+一百零七点八七 GB。和 Vulkan 报的一百一十一点八不是同一个数，但同一个池子。**到这一步，HIP 在 Windows 上是活的。**
+
+### 编 llama.cpp 的时候，我掉了五个坑
+
+**第一个。** 我先想走正规入口。VS 里有个 `Launch-VsDevShell.ps1`，或者 `vcvars64.bat`。两个都起不来：
+
+```text
+PROGRAM BLOCKED BY SECURITY POLICY
+  - reg.exe (C:\WINDOWS\system32\reg.exe)
+This block cannot be approved or bypassed from the current command.
+```
+
+它们内部要查注册表。我这边查不了。最后是**手工拼环境变量**，一个字节都不碰注册表：
+
+```text
+INCLUDE = <MSVC>\include; <SDK>\Include\<ver>\ucrt; ...\um; ...\shared; ...\winrt; ...\cppwinrt
+LIB     = <MSVC>\lib\x64; <SDK>\Lib\<ver>\ucrt\x64; ...\um\x64
+PATH   += <MSVC>\bin\Hostx64\x64; <SDK>\bin\<ver>\x64
+```
+
+本机是 MSVC `14.51.36231` 和 SDK `10.0.26100.0`。
+
+**第二个。** 配完了，CMake 说：
+
+```text
+-- Check for working C compiler: .../cl.exe - broken
+```
+
+`cl.exe` 明明在。真话藏在下面一行：
+
+```text
+RC Pass 1: command "rc /fo ... manifest.res" failed ... "no such file or directory"
+```
+
+**缺 `rc.exe` 和 `mt.exe`。** 它们不在 MSVC 里，在 Windows SDK 的 `bin\<ver>\x64` 下面。加进 PATH。
+
+**第三个。** 加进去之后又炸，说是路径转义：
+
+```text
+Invalid character escape '\P'.
+    C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\rc.exe
+```
+
+我显式传了 `-DCMAKE_RC_COMPILER=<带反斜杠的路径>`，CMake 把它原样写进了生成文件。**别传。让它自己从 PATH 里找。** 编译器路径也一律改成正斜杠。
+
+**第四个，也是最费时的。** Configure 过了，编译全挂：
+
+```text
+C:\opt\rocm\include\hip\amd_detail\math_fwd.h(90): error C2086: "int __attribute__": 重定义
+C:\opt\rocm\include\hip\amd_detail\math_fwd.h(90): error C2062: 意外的类型"float"
+fatal error C1003: 错误计数超过 100
+```
+
+**MSVC 在直接编译 `.cu` 文件。** HIP 的头文件里全是 `__attribute__`，那是 clang 的语法，MSVC 不认。**宿主编译器必须换成 ROCm 自带的 AMD clang。** 但 MSVC 的头文件和库还得留着——AMD clang 在 Windows 上要链接 MSVC 的 STL 和 CRT。
+
+```text
+-DCMAKE_C_COMPILER=C:/opt/rocm/lib/llvm/bin/clang.exe
+-DCMAKE_CXX_COMPILER=C:/opt/rocm/lib/llvm/bin/clang++.exe
+-DCMAKE_HIP_COMPILER=C:/opt/rocm/bin/hipcc.exe
+```
+
+**第五个，跟编译无关，跟脚本有关。** 我把编排写成 `.ps1` 交给计划任务，跑完任务状态是 `1`，日志**一行都没写**。查了半天：**Windows PowerShell 5.1 会把没有 BOM 的 UTF-8 按 GBK 解码**，而我的脚本第一行就是中文注释。解析直接失败，stderr 又被计划任务丢掉，所以什么都不剩。同一个目录里另一个脚本第一行是 ASCII，侥幸躲过。
+
+**改成 Python 就好了。**
+
+最后：
+
+```text
+[01:44:57] build rc=0
+[01:44:57] OK: ...\build-hip\bin\llama-server.exe  size=86568960
+```
+
+360/360 个目标，零错误，四点七分钟。
+
+```text
+$ llama-server --list-devices
+Available devices:
+  ROCm0: Radeon 8060S Graphics (110456 MiB, 110301 MiB free)
+```
+
+## 六 · token/s
+
+通了以后要做的第一件事，是问它比原来快多少。
+
+同一个模型（`Qwen3.6-35B-A3B` UD-Q4_K_XL，二十点八一 GiB）、同一参数（`-ngl 999`）、**会话外采集**：
+
+| 测试 | Vulkan（官方 b11565） | HIP/ROCm（自建 8bb3cf0） | 差 |
+|---|---|---|---|
+| pp512 | **1236.34** ±9.23 | 1204.95 ±44.10 | Vulkan +2.6% |
+| pp4096 | 1159.25 ±27.66 | **1195.63** ±25.25 | HIP +3.1% |
+| pp8192 | 1215.08 ±**0.09** | **1277.78** ±16.08 | HIP +5.2% |
+| **pp32768** | 927.61 ±2.77 | **1047.74** ±19.43 | **HIP +12.9%** |
+| tg128（第一次） | **47.30** ±0.50 | 44.87 ±2.16 | Vulkan +5.4% |
+| tg128（第二次） | **54.16** ±0.43 | 51.64 ±0.37 | Vulkan +4.9% |
+
+HIP 的长预填优势是真的，而且**随上下文单调放大**：三点一、五点二、十二点九。加长它还会涨。
+
+但是**没有"两倍"**。我听来的那些数——653 对 308——大概是"调优过的 ROCm 打没调优的 Vulkan"。在我这里，把两边都按同样的规矩摆好，差距是这十二点九。
+
+解码反过来，Vulkan 稳定赢五个点，两轮独立跑出来，一次五点四一次四点九。
+
+还有一件事我没预料到。看误差：
+
+```text
+pp8192   Vulkan  ±0.09
+         HIP     ±16.08
+```
+
+一百八十倍——严格说这是两个**标准差**之比（±16.08 / ±0.09），不是抖动幅度之比。HIP 在我这台机器上是**抖**的。我不知道为什么。也许和驱动版本有关，也许和那个 `amdhip64_7.dll` 的调度有关，也许只是我这一台。**我没有查清楚，我只知道它抖。**
+
+**结论是分叉的，不是一句话：** 我做的是短提示、长输出的语料生成，**继续用 Vulkan**；如果哪天真要"整仓代码一次喂进去"，那时候换 HIP。
+
+## 七 · 生成语料
+
+有了引擎，才轮到我本来要做的事：**造语料，给编译器找错**。
+
+### 方法
+
+每一个生成的 `.c` 文件，喂给四个裁判：
+
+```text
+clang 22.1.4
+gcc 16.2.0
+vitro --backend wasm
+vitro --backend native
+```
+
+两个后端是**硬规矩**。两边不一致，是最高严重度的独立桶——以前有过一整条语料管线因为双端不一致被清出去的先例。
+
+然后按结果分桶：
+
+```text
+vitro_accept_clang_reject    误收——编译器接受了非法程序。最危险。
+crash / arm_divergence       崩 / 双臂不一致
+vitro_reject_clang_accept    误拒——合法 C 被拒
+diag_mismatch / no_signal    诊断级别错 / 四方一致
+```
+
+脚本：`gen_and_judge.py` / `gen_and_judge2.py`（本地两批）、`judge_dir.py`（通用补判）、`rejudge_gptoss.py`（第三来源重判——fail loud 修正版）。全部产物落盘 `tmp/review_20261012/`。
+
+### 关于"关思考"
+
+第一件要定的是工作点。我原来打算让模型开思考——推理型的模型输出质量更好，这是常识。
+
+第一次跑，五个 P 里有四个对了，一个用了两千五百个 token。第二次，`g1a` 那一例在两千六百个 token 处停住，落下来的文件只有一个 `typedef`：
+
+```c
+typedef struct {
+    int id;
+    double value;
+    char label[32];
+} MyStruct;
+```
+
+九十一字节。
+
+日志里写着：
+
+```text
+total time = 48857.47 ms / 2676 tokens
+```
+
+两千六百七十六个 token，用完了，代码才写了四行。**思考在跟"输出一段完整程序"抢同一笔预算。**
+
+我改成全方向关思考，`max_tokens` 拉到两千，加截断重试。然后每例只要一到三秒：
+
+```text
+g1a_struct_byvalue   3.4s   172 tok   50.6 tok/s
+g1b_struct_nested_ptr 3.5s  175 tok   50.1 tok/s
+q1a_qual_prefix      1.3s    64 tok   47.8 tok/s
+```
+
+**整批四十秒。**
+
+### 另一个差点一句话否掉的：投机解码
+
+跟"关思考"并列的第二个工作点，是**投机解码**。
+
+llama.cpp 里它有两种。一种是**外挂一个 draft 模型**——小模型先猜几个 token，大模型批量验证。听起来很妙。但在 MoE 上它是**陷阱**：验证的时候每个 token 都可能路由到不同的专家，为了批量验证，几乎全量的专家都得拉进缓存——验证一遍比顺序生成还慢，实测 **-60%**。
+
+另一种是 **MTP**，模型自带的预测头。`Qwen3.6-35B-A3B` 自带这个头，同模型实测 **+38%**（46.2 → 63.7 t/s）。我差点把"投机解码"四个字整个否掉——分清这两种之后，才没有。
+
+但 MTP 的收益随模型规模衰减：122B 上 Vulkan 反而 **-11%**。所以它对"小激活 MoE"才是净收益。我最后下了 **MTP 版权重**（比普通版大 0.49 GB，就是那截预测头）。
+
+### 三批，三十例
+
+第一批十个，五个正确、五个故意错误，没有方向。第二批十个，**按方向**：聚合、字符串 libc、初始化器、限定符顺序、非法误收。第三批是云端，提示词集和第二批**完全一样**——这样两边的谱差就是模型偏置。
+
+三十例合起来：**六次命中缺口，二十四次四方一致，误收零，双臂不一致零。**
+
+### 三批逐例
+
+批次 1（本地 Qwen · 无方向 · A=ACCEPT R=REJECT）：
+
+| 例 | 期望 | clang | gcc | vitro（双臂） | 桶 |
+|---|---|---|---|---|---|
+| c1_struct_ptr | P | A | A | A | no_signal |
+| **c2_array_sort** | P | A | A | **R E3039×6** | 缺口① |
+| c3_recursion | P | A | A | A | no_signal |
+| c4_string_reverse | P | A | A | A | no_signal |
+| **c5_malloc** | P | A | A | **R E3023+E3021** | 缺口② |
+| w1 缺分号 | N | R | R | R E2005 | no_signal |
+| w2 未声明变量 | N | R | R | R E3023 | no_signal |
+| w3 全角分号 | N | R | R | R E1001 | no_signal |
+| w4 缺右括号 | N | R | R | R E2007+E2003+E2005×4 | no_signal |
+| w5 条件里 `=` | N | A | A | A（仅 W3050 警告） | 四 ACCEPT，仅警告 |
+
+批次 2（本地 Qwen · 按方向）：
+
+| 例 | 方向 | clang/gcc | vitro | 桶 |
+|---|---|---|---|---|
+| **g1a struct_byvalue** | 聚合 | A / A | **R E3006** | 缺口③ |
+| g1b struct_nested_ptr | 聚合 | A / A | A | no_signal |
+| c1a libc_str / c1b hand_strlen | 字符串 | A / A | A | no_signal |
+| d1a designated_init / d1b nested_init | 初始化器 | A / A | A | no_signal |
+| q1a qual_prefix | 限定符 | A / A | A | no_signal |
+| **q1b qual_suffix** | 限定符 | A / A | **R E2005×6+E2007** | 缺口（已知族） |
+| n1a assign_mismatch / n1b call_argcount | 误收 | R / R | R E3004 / E3054 | no_signal |
+
+批次 3（云端 Step5 · 与批次 2 同提示词集）：
+
+| 例 | clang/gcc | vitro | 桶 |
+|---|---|---|---|
+| **P1_struct_byvalue** | A / A | **R E3006** | 缺口③ |
+| P2_libc_string | A / A | A | no_signal |
+| P3_designated_init | A / A | A | no_signal |
+| **P4_qualifier_order** | A / A | **R E2005×8+E2007** | 缺口（已知族） |
+| P5_ptr_multidim | A / A | A | no_signal |
+| N1~N5 | R / R | R E3004 / E3054 / E3054 / E3040 / E3049 | no_signal |
+
+批次 4（gpt-oss-120b · 非 Qwen 系）：
+
+| 例 | clang/gcc | vitro | 桶 |
+|---|---|---|---|
+| P1_struct_byvalue / P2_libc_string | A / A | A | no_signal |
+| **P3_designated_init** | A / A | **R E0** | **缺口④** |
+| **P4_qualifier_order** | A / A | **R E2005** | 缺口（已知族） |
+| **P5_ptr_multidim** | A / A | **R E2003** | **缺口⑤** |
+| N1~N5 | R / R | R（E3004/E3054/E3040/E3049 同族） | no_signal |
+
+### 五个缺口
+
+全部是 clang 和 gcc 都接受、vitro 拒。
+
+**第一个，宽整数下标。**
+
+```c
+long long i, j;
+int arr[8];
+for (i = 0; i < 8; i++) arr[i] = 0;
+```
+
+`E3039` 报六次。多级下标还会级联出 `E3040`，实测九处。根因在下标判定用的是窄版谓词（只认 `int` 和 `char`），同一个包里已经有宽版（含 `long long`）但没接上。
+
+**第二个，`malloc(n * sizeof *p)`。**
+
+```c
+int *p = malloc(n * sizeof *p);
+```
+
+`E3023` 加 `E3021`。这是 C 社区推荐的写法——避免重复写类型。
+
+我做了一组隔离，因为它太像"自引用初始化器"这个通病：
+
+```text
+A  int *p = malloc(n * sizeof *p);         → 拒
+B  malloc(n * sizeof(int))                 → 过
+C  int *p = q ? q : &n;（自引用，无 sizeof）→ 过
+D  int *p;  p = malloc(n * sizeof *p);     → 过
+```
+
+B 和 C 过，说明它不是自引用的通病。D 过，说明它也不是 `sizeof` 的问题。**是"声明语句的初始化器里出现 `sizeof(自身)`"——声明符还没进作用域。**
+
+**第三个，`struct` 成员 `char[]` 不能用字符串字面量初始化。**
+
+```c
+struct S { char s[64]; };
+struct S a = {"Hi"};
+```
+
+`E3006`：`字段 's' 期望 'char[64]'，实际 'char[3]'`。它把 `"Hi"` 当成一个 `char[3]` 的数组去比。
+
+```text
+A  char top[64] = "Hi";                    → 过
+B  struct S { char s[64]; }; struct S a = {"Hi"};     → 拒
+C  同上写成 { {"Hi"} }                     → 拒
+D  struct T { int n; char s[64]; }; {1,"Hi"} → 拒
+```
+
+**A 过。** 顶层 `char[]` 走的是对的路。只有"结构体成员"这一支漏了。对应 C11 6.7.9p14。
+
+这一个影响面最大——真实代码里，任何一个带 name 字段的 struct 都这么写。
+
+**第四个和第五个，是第三个模型找出来的。** 后面再说。
+
+### 方向级的账
+
+我把第二批按方向做，是想知道**哪一族已经饱和**。结果：
+
+```text
+D-C1 字符串 libc    两个模型都过
+D-D1 初始化器       两个模型都过
+D-A2 指针多维       两个模型都过
+D-Q1 限定符顺序     两个模型都中
+D-N1 非法误收       七个语义误用全被正确拒
+```
+
+限定符顺序那一族中得很系统：`const static int` 写在文件作用域、`int const` 当参数，报 `E2005` 六次加 `E2007` 一次，clang 和 gcc 都接受。
+
+误收桶到现在还是空的。七条语义误用——赋值类型不匹配、传参类型错、返回类型错、对 `int` 用下标、改 `const`——全被拒，码是 `E3004`、`E3054`、`E3040`、`E3049`。这是好消息。
+
+### 三个模型
+
+做到这里我改了一个判断。我把云端那批的提示词集设成和本地完全一样，因为我想知道两件事：同一个方向上，不同模型会不会撞同一处；以及**桶分布**会不会一样。
+
+一样。
+
+```text
+本地 Qwen3.6-35B-A3B     2 缺口 / 8 no_signal
+云端 Step5 Preview       2 缺口 / 8 no_signal
+```
+
+同一个方向命中同一个缺口：`struct` 成员 `char[]` 两方都是 `E3006`，限定符顺序两方都是 `E2005`。
+
+所以我改了结论。原来的结论是"缺口是模型的产物，要看概率"。**现在是：缺口不是模型的产物，是编译器自己的系统性缺陷——这排除了"模型偶然性"这一类反证。**
+
+更强的在后面。桶分布完全一致，意味着**瓶颈是编译器里固定的几个缺口，不是语料的覆盖广度**。
+
+**所以我把自己上一轮的建议推翻了：扩量到五十例、一百例的优先级，应该往下调。先修缺口。** 继续加量只会把同一个缺口重复撞出来。
+
+### 第三个模型
+
+我下了 gpt-oss-120b。六十三个 G，非 Qwen 系。它在这台机上，提示词评估二百五十六点八 t/s，解码五十五点零 t/s。
+
+同样的十例，同样的提示词集。结果：
+
+```text
+P1_struct_byvalue     四方全过
+P2_libc_string        四方全过
+P3_designated_init    clang 过 gcc 过 vitro 拒
+P4_qualifier_order    clang 过 gcc 过 vitro 拒
+P5_ptr_multidim       clang 过 gcc 过 vitro 拒
+N1~N5                 四方全拒
+```
+
+**桶分布：七个 no_signal，三个误拒。**
+
+P4 和前两个模型一样，还是限定符顺序。**但 P3 和 P5 是新的，而且这两条前两个模型都过了。**
+
+第四个缺口，文件作用域的指定初始化器：
+
+```c
+int a[8] = { [2] = 7, [5] = 9 };                // 文件作用域 → 拒，E0
+int main(void){ int a[8] = { [2]=7,[5]=9 }; }   // 块作用域   → 过
+int b[8] = { 1, 2 };                            // 文件作用域普通列表 → 过
+```
+
+**不是"文件作用域"本身**（第三个过），**也不是"指定初始化器"本身**（第二个过）。是这两个凑一起。
+
+而且它报的是 `E0`——**一个没有分类的兜底码**。在这个报得出三百多个专属码的地方，冒出一个 `E0`，这件事本身要单独查。
+
+前两个模型为什么没找到？因为它们都把指定初始化器**写在 `main` 里**。
+
+第五个，`ptrdiff_t`：
+
+```c
+#include <stdio.h>
+int main(void){ ptrdiff_t x = 0; }        // 拒，E2003
+// 同样只 include stdio.h，换成 size_t  → 过
+// 加上 #include <stddef.h>              → 过
+```
+
+**stdio.h 的存根传递了 `size_t`，漏了 `ptrdiff_t`。** 一行的事。
+
+前两个模型为什么没找到？因为它们要么显式 include 了 `stddef.h`，要么根本没用这个类型。
+
+### 四个方向的对照表
+
+| 方向 | Qwen | Step5 | gpt-oss |
+|---|---|---|---|
+| 指定初始化器 | 过 | 过 | **中** |
+| 多维指针（含 `ptrdiff_t`） | 过 | 过 | **中** |
+| 限定符顺序 | 中 | 中 | 中 |
+| struct 成员 `char[]` | 中 | 中 | 过 |
+
+**既不是"每个模型都撞同一处"，也不是"换个模型就全不同"。**
+
+方向是稳的——限定符顺序三个模型全中，那是一个稳定的缺口族。但**形状是模型定的**——另外两个方向，只有第三个模型写出了会踩中的形状。
+
+**所以语料来源的家族数必须继续加。而"这个方向饱和了"这种判断，不能只凭一两个模型说。**
+
+## 八 · 问题
+
+这三十个小时里，我犯的错比我发现的缺口多。挑三条最值钱的。
+
+**第一条，判定用的脚本必须只会喊，不会猜。**
+
+我写过一个判分脚本，把两件事写进了同一个分支：**启动失败**（返回码 `-1`），和**裁判拒绝**（返回码 `1`）。结果是一整批 `gcc=REJECT`，整批 `vitro=?`。全是假的。
+
+`gcc` 为什么启动失败？因为**计划任务的环境里没有用户的 PATH**，`D:\code\mingw64\bin` 不在里面。
+
+`bash` 也一样。
+
+改成绝对路径之后好了。但这里还有一层我当时没想明白：我先是在 Python 里把 `env` 里的 `PATH` 补全，然后传 `env` 给 `subprocess`——**没用**。因为**在 Windows 上，Python 找可执行文件用的是当前进程的 PATH，不是传进去的那个 env 的 PATH**。`clang` 和 `bash` 能跑，仅仅因为它们本来就在当前进程的 PATH 里。
+
+**第二条，退出码是什么意思，得先查清再用。**
+
+我把 `vitro` 的返回码 `1` 当成了"启动失败"。它不是。它是**编译结果**——`0` 通过，`1` 有错误，`3` 是壳降级。我拿它判启动，把一整批正常的"编译失败"全判成了"环境坏了"。
+
+正确的判据是**无条件解析标准输出里的那个 JSON 帧，看帧里有没有 `ok` 字段**。返回码和它无关。
+
+**第三条，长任务的输出不要过管道。**
+
+我第三次踩这个。`... | tail -20` 会把输出缓冲住，命令行看着像卡死，其实是在跑。**直接写日志文件。**
+
+顺带记几个不喊但会咬人的：
+
+- 计划任务的一次性触发器，**重启之后就失效了**，不会自己回来。
+- 并发下载之前先量一下：在 ModelScope 上多连接快三分之一，在 AMD 的源上快零。
+- 壳脚本的陈旧检查不能删。它的价钱是五百毫秒，但它是防着"用旧二进制跑基准"这种事。
+- 分段下载器不能信 HEAD。
+
+## 九 · 这些我能确定
+
+凌晨一点四十，那个一百四十三点五毫秒。我拿着它在两个方向上用过——先是拿它算批量语料要跑多久，结论是"要八小时，太慢"；后来发现它本身就是错的。
+
+三十个小时里，几乎每一个我一开始就相信的结论，都被推翻了：
+
+以为要换一个更快的引擎，其实要做的只是打开一个装了很久、一直没打开的后端。
+
+以为瓶颈是并发，其实是"每一例要起四个进程"——而引擎本身只值两毫秒。
+
+以为一个模型生成的语料够用了。第三个模型上来就多挖出两个前两个模型完美绕过的缺口。
+
+以为性能数字是客观的。它带着一百四十五毫秒的税，而税只在那一间屋子里收。
+
+**这些我能确定：**
+
+那两点一毫秒的针脚是真的，我摸得到。pp32768 上那十二点九是真的，两轮都是这个方向。三个模型桶分布一样也是真的，我数过。`E0` 和 `E2003` 那两个最小复现，clang 和 gcc 都过，vitro 都拒，我一条条跑过。
+
+**至于另外那些——**
+
+HIP 为什么比 Vulkan 抖这么多（两个标准差之比接近一百八十倍），我不知道。我没有查。
+
+传闻里的"两倍"是从哪来的，我只能推测，没有证据。
+
+那个 `E0` 是设计成一个兜底，还是漏了一个专属码，我不知道。这得去问写它的人。
+
+我到底为什么要花三十个小时做这件事，我也不知道。也许只是刚好有空。也许只是没人找我。
+
+**能被证伪的数字，才是数字。**
+
+## 附 · 先摆数据
+
+（正文按时间顺序走；数据集中放在最后，方便逐条核对，不打断前面的叙述。）
+
+**硬件**
+
+| 项 | 值 |
+|---|---|
+| SoC | Ryzen AI Max+ 395（Strix Halo）/ Radeon 8060S / gfx1151 |
+| 内存 | 128 GB LPDDR5X-8000，实测约 215 GB/s |
+| BIOS UMA 96 GB | iGPU 实测 **111.8 GiB** 可用；**主机内存被压到 31.6 GB** |
+
+**引擎基座**
+
+| 对比 | 结果 |
+|---|---|
+| dense 27B Q4：**GPU vs CPU** | **12.2 vs 3.35 t/s**（GPU 快 3.6×，核数吃不满带宽） |
+| MoE 35B-A3B Q4 | 52 ~ 56 t/s |
+| 量化后端：Vulkan vs ROCm | **60.4 vs 49.6 t/s**（全精度 BF16 反转：23.7 vs 10.7） |
+| llama.cpp vs vLLM（单流） | 81.04 vs 81.93 ≈ 平手（vLLM 优势全在并发） |
+| dense 70B Q4 理论上限 | ~5 t/s（实测带宽 215 GB/s ÷ 42 GB）⇒ **dense 没救，MoE 才有戏** |
+
+**模型候选清单**
+
+| 模型 | 家族 | 体积 | 结论 |
+|---|---|---|---|
+| Qwen3.6-35B-A3B UD-Q4_K_XL | Qwen | 22.4 GB | **吞吐主力** |
+| Qwen3.6-27B / Coder-Next | Qwen | ~17 GB | 备选 |
+| gpt-oss-120b UD-Q4_K_XL | OpenAI | 58.7 GB | **非 Qwen 的第三来源**（要 96 GB UMA 才放得下） |
+| gemma-4-26B-A4B UD-Q4_K_XL | Google | 17.0 GB | 非 Qwen + 快，可与主力同驻 |
+| gpt-oss-20b MXFP4 | OpenAI | 12.1 GB | 实测最快（79.8 t/s） |
+| MiniMax-M2.7 / Qwen3.5-122B / Qwen3-235B | 各家族 | 94 ~ 97 GB | 放得下但慢（18 ~ 31 t/s），暂缓 |
+| Qwen3-Next-80B-A3B | Qwen | ~46 GB | **老一代**——新一代 35B-A3B 已在编码上超过上一代 122B ⇒ **代际 > 尺寸，不选** |
+
+**三批语料对拍（四裁判 × 双端，各 10 例）**
+
+| 批次 | 生成器 | 缺口命中 | 桶分布 |
+|---|---|---|---|
+| 1（无方向） | 本地 Qwen3.6-35B-A3B | **2**（E3039 / E3023+E3021） | 8 no_signal |
+| 2（按方向） | 本地 Qwen3.6-35B-A3B | **2**（E3006 / E2005） | 8 no_signal |
+| 3（同提示词集） | 云端 Step5 Preview | **2**（E3006 / E2005×8） | 8 no_signal |
+| 4 | **gpt-oss-120b**（非 Qwen 系） | **3**（**E0 / E2003** 为新增，E2005 三模型一致） | 7 no_signal |
+
+**五个缺口总表**（全部 clang 22.1.4 + gcc 16.2.0 双 ACCEPT、vitro wasm+native 双 REJECT）
+
+| # | 缺口 | 最小复现一句 | 码 |
+|---|---|---|---|
+| 1 | 宽整数下标 | `long long i; arr[i] = 0;` | E3039（多级下标级联 E3040） |
+| 2 | `malloc(n * sizeof *p)` | 声明语句初始化器里出现 `sizeof(自身)` | E3023 + E3021 |
+| 3 | struct 成员 `char[]` ← 字符串字面量 | `struct S{char s[64];} a = {"Hi"};` | E3006 |
+| 4 | **文件作用域指定初始化器** | `int a[8] = { [2]=7, [5]=9 };`（文件作用域） | **E0**（无分类兜底码） |
+| 5 | **`ptrdiff_t` 存根缺失** | 只 `#include <stdio.h>` 后使用 `ptrdiff_t` | E2003 |
+
+**Vulkan vs HIP 正面对拍**（同模型 · `-ngl 999` · 会话外）
+
+| 测试 | Vulkan（官方 b11565） | HIP/ROCm（自建 8bb3cf0） | 差 |
+|---|---|---|---|
+| pp512 | **1236.34** | 1204.95 | V +2.6% |
+| pp4096 | 1159.25 | **1195.63** | H +3.1% |
+| pp8192 | 1215.08 ±**0.09** | **1277.78** ±16.08 | H +5.2% |
+| **pp32768** | 927.61 | **1047.74** | **H +12.9%** |
+| tg128 解码（两轮） | **47.30 / 54.16** | 44.87 / 51.64 | **V +5%**（复现） |
+
+**三十例合计**：缺口命中 6 次、四方一致 24 次、**误收 0、双臂不一致 0**。
+
+---
+
+*本文数据均为本机实测。性能数字一律在 agent 会话外采集（Windows 计划任务，延时触发器，七轮丢首轮取中位）。*
