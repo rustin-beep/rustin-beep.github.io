@@ -1,0 +1,71 @@
+---
+/**
+ * 代码块「机框」装饰 —— 给每个 pre.astro-code 包一层 figure.code-figure，
+ * 顶部生成一条 code-bar（左：语言/文件名标注，右：操作区）。
+ *
+ * 2026-10-14 从 PostLayout.astro 原样抽出：程序页（ProgramLayout）的
+ * <Code> 产物与 MDX 围栏走同一条装饰管线，只维护一份。
+ *
+ * 为什么是渲染后脚本而不是构建期改结构：Astro 7 的 Markdown 管线是 Sätteri，
+ * 没有现成的 remark/rehype 可挂（PLAN.md §三），为一个装饰件引 hast 插件
+ * 不划算。代价是标签需要 JS——与复制按钮同一条边界。
+ *
+ * 脚本顺序契约：本组件必须排在 VitroRunner 之前（后者要复用这里造好的
+ * .code-actions）。
+ */
+---
+
+<script is:inline>
+  document.querySelectorAll('pre.astro-code').forEach((pre) => {
+    if (
+      pre.parentElement &&
+      pre.parentElement.classList.contains('code-figure')
+    ) {
+      return;
+    }
+
+    const lang = pre.getAttribute('data-language') || 'text';
+    const meta = (pre.getAttribute('data-meta') || '').trim();
+    const label = meta || lang;
+
+    const bar = document.createElement('div');
+    bar.className = 'code-bar';
+
+    const span = document.createElement('span');
+    span.className = 'code-lang';
+    span.textContent = label;
+
+    // 操作区：按钮们收进一个容器，bar 保持「左标注 / 右操作」两段式。
+    // 不这么做的话 space-between 会把后来插入的运行按钮推到正中间。
+    const actions = document.createElement('div');
+    actions.className = 'code-actions';
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'code-copy';
+    btn.textContent = '复制';
+    btn.setAttribute('aria-label', '复制代码');
+
+    btn.addEventListener('click', async () => {
+      const code = pre.querySelector('code');
+      const text = code ? code.innerText : pre.innerText;
+      try {
+        await navigator.clipboard.writeText(text);
+        btn.textContent = '已复制';
+      } catch {
+        btn.textContent = '复制失败';
+      }
+      setTimeout(() => {
+        btn.textContent = '复制';
+      }, 1600);
+    });
+
+    actions.append(btn);
+    bar.append(span, actions);
+
+    const fig = document.createElement('figure');
+    fig.className = 'code-figure';
+    pre.parentNode.insertBefore(fig, pre);
+    fig.append(bar, pre);
+  });
+</script>

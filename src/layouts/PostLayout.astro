@@ -10,6 +10,9 @@ import TableOfContents from '../components/TableOfContents.astro';
 import { SITE_NAME, SITE_URL, GITHUB_URL } from '../site.config';
 import { readingStats, formatCount } from '../lib/reading-time';
 import { postHref, isArchivedPost, type Post } from '../lib/posts';
+import CodeFrame from '../components/CodeFrame.astro';
+import VitroRunner from '../components/VitroRunner.astro';
+import VitroScrubber from '../components/VitroScrubber.astro';
 
 interface Props {
   post: CollectionEntry<'posts'>;
@@ -31,6 +34,10 @@ const ogImage = new URL(`/og/${slug}.png`, SITE_URL).toString();
 // （手写就会出现"忘了改"的第二真相源）。
 // 代码块被排除在统计外，理由见 lib/reading-time.ts。
 const stats = readingStats(post.body ?? '');
+
+// 有 ```c 围栏才注入运行脚本——没有 C 块的文章页一行 JS 都不多带。
+// 误判（比如把文档里演示的围栏当代码块）的代价只是多跑一次空查询，无害。
+const hasCCode = /^```c\b/m.test(post.body ?? '');
 
 const fmt = new Intl.DateTimeFormat('zh-CN', {
   year: 'numeric',
@@ -174,61 +181,19 @@ const fmt = new Intl.DateTimeFormat('zh-CN', {
   </nav>
 
   <!--
-    代码块装饰：给每个 pre.astro-code 包一层 figure.code-figure，
-    顶部生成一条 code-bar（左侧语言/文件名标注，右侧复制按钮）。
-
-    语言取自 Shiki 写入的 data-language；若围栏写了 meta（如 ```c title="main.c"），
-    meta 优先显示，这样既能标类型也能标文件名。
-
-    MDX 内容不走组件，所以只能在渲染后统一注入。刻意用内联脚本而非框架：
-    这是全站唯一一处功能性 JS（连同主题切换，约 1 KB）。
+    C 运行按钮与时间旅行回放已抽成共享组件（2026-10-14，PLAN-vitro.md §四）：
+    CodeFrame 给每个 pre.astro-code 包机框；VitroRunner（运行）与 VitroScrubber
+    （回放）绑定 [data-vitro] 容器与 c 围栏（本页）——脚本全站
+    只此一份，外链 JS 恒为 0 **文章里的每个 c 代码块都能运行、都能拖时间轴**。
+    只在有 C 块的文章页注入；没有 C 块的页面一行 JS 都不多带。
   -->
-  <script is:inline>
-    document.querySelectorAll('pre.astro-code').forEach((pre) => {
-      if (
-        pre.parentElement &&
-        pre.parentElement.classList.contains('code-figure')
-      ) {
-        return;
-      }
-
-      const lang = pre.getAttribute('data-language') || 'text';
-      const meta = (pre.getAttribute('data-meta') || '').trim();
-      const label = meta || lang;
-
-      const bar = document.createElement('div');
-      bar.className = 'code-bar';
-
-      const span = document.createElement('span');
-      span.className = 'code-lang';
-      span.textContent = label;
-
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'code-copy';
-      btn.textContent = '复制';
-      btn.setAttribute('aria-label', '复制代码');
-
-      btn.addEventListener('click', async () => {
-        const code = pre.querySelector('code');
-        const text = code ? code.innerText : pre.innerText;
-        try {
-          await navigator.clipboard.writeText(text);
-          btn.textContent = '已复制';
-        } catch {
-          btn.textContent = '复制失败';
-        }
-        setTimeout(() => {
-          btn.textContent = '复制';
-        }, 1600);
-      });
-
-      bar.append(span, btn);
-
-      const fig = document.createElement('figure');
-      fig.className = 'code-figure';
-      pre.parentNode.insertBefore(fig, pre);
-      fig.append(bar, pre);
-    });
-  </script>
+  <CodeFrame />
+  {
+    hasCCode && (
+      <>
+        <VitroRunner />
+        <VitroScrubber />
+      </>
+    )
+  }
 </BaseLayout>

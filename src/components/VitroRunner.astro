@@ -1,0 +1,440 @@
+---
+/**
+ * C 代码「运行」按钮 —— 后端是 Vitro 的 wasm-gc 引擎，在浏览器里就地
+ * 编译执行，不起服务、不装依赖。
+ *
+ * 2026-10-14 从 PostLayout.astro 抽出并泛化（PLAN-vitro.md §四）：
+ * 绑定目标从「pre.astro-code[data-language="c"]」扩为 **[data-vitro] 容器**
+ * （程序页用，可带 data-argv / data-stdin，来自 .c 头注释的 @argv / @stdin），
+ * MDX 围栏走原路径兜底——两条通道共用这一份脚本，单一真相源。
+ * 引擎行为注释（装载/实例化/协议/与 demo 的比对结论）随原脚本一并迁来。
+ *
+ * 产物：public/vitro/wasm.wasm
+ *   源：D:\code\Vitro\moonbit\_build\wasm-gc\release\build\gateway\wasm\wasm.wasm
+ *   构建：cd moonbit && moon build --release --target wasm-gc gateway/wasm
+ *   指纹：md5 71a037c48f756915ecddcaa44abc3f4c · engine 0.8.0 · protocol v0.1
+ *        （搬过来时跑过 Vitro scripts/demo_smoke/main.js：168/168 PASS）
+ * 换产物：npm run sync-vitro（自动拷贝 + 重算 md5 + 改本头注指纹），
+ *      然后重跑一次 demo_smoke 再构建。为什么钉死而不去取 demo 站点的
+ *      线上 wasm：那是个没有版本号的移动靶（Last-Modified 2026-10-13），
+ *      博客的文章结论是按具体引擎行为写的，静默漂移会让"点击复现"与
+ *      正文对不上——版本要显式换，不要偷偷换。
+ * 协议：NDJSON 帧，单出口 invoke(string) -> string（wasm 只导出 4 个函数），
+ *      消费链 session.create → config.set → compile → run → output.delta，
+ *      与 Vitro demo/js/gw.ts、scripts/wasm_gateway/host.js 同语义；
+ *      stdout/stderr 是 C 程序字节流（Latin-1 域），须 latin1ToUtf8 还原。
+ *
+ * 与 demo 接线的逐行比对（2026-10-14 做过，结论记于此）：
+ *   一致——实例化契约（js-string + importedStringConstants "_"）、帧结构
+ *     {id,method,params}、消费链、Latin-1 口径、waiting_input/input.feed。
+ *   刻意偏差——① demo 缓存单例 exports，本脚本每轮运行实例化新 instance
+ *     （Module 仍只编译一次，实测 1.06ms/次）：demo 没处理 stdin 跨
+ *     session.create 残留，博客读者喂超输入会漏进下一轮，详见下方注释；
+ *     ② 不接 memory.regions 与 note 流——前者是教学内存地图、后者只有
+ *     一句"程序运行完成"（与状态栏重复），都超"不需要太多功能"的范围；
+ *     ③ 不调 reset()——fresh instance 下 session.create 已包容其语义。
+ *
+ * 为什么是 wasm 而不是"起个后端"：本站部署到 GitHub Pages 纯静态
+ * （见 .github/workflows/deploy.yml，withastro/action 只构建上传），
+ * Vitro 的 native serve 是 stdio NDJSON 壳，没有可部署的服务端出口；
+ * wasm-gc 单出口正是它给浏览器准备的形态（在线 demo 同款）。
+ *
+ * 约束：本脚本 is:inline——外链 JS 恒为 0（普通 <script> 会被 Astro
+ * 打包成外链文件）。wasm 是 fetch 下来的二进制资产，不是 JS，不破例。
+ *
+ * 脚本顺序契约：CodeFrame（机框装饰）必须先跑——本脚本复用它造好的
+ * .code-actions。
+ */
+---
+
+<script is:inline>
+  (function () {
+    'use strict';
+
+    var WASM_URL = '/vitro/wasm.wasm';
+
+    /* ------------------------------------------------------------
+       引擎装载：Module 只编译一次（约 0.9 MB，首次点击的成本），
+       但**每轮运行实例化一个全新 instance**。
+       为什么不能缓存 exports 复用：引擎的 stdin 缓冲跨
+       session.create 存活（gateway protocol.mbt 的
+       reset_session_preserving_config → vm.reset() 刻意不碰
+       vm.input——2026-10-14 读源码 + 实测确认：喂超了的行会
+       漏进下一轮 run，输出通道也跨 create 残留过）。新实例 =
+       全新会话，残留状态整类绝迹。
+       ------------------------------------------------------------ */
+    var engineModule = null;
+    var enginePromise = null;
+
+    function loadEngine() {
+      if (engineModule) return Promise.resolve(engineModule);
+      if (!enginePromise) {
+        enginePromise = (async function () {
+          var resp = await fetch(WASM_URL);
+          if (!resp.ok) {
+            throw new Error('引擎下载失败（HTTP ' + resp.status + '）');
+          }
+          var buf = await resp.arrayBuffer();
+          // 与 Vitro demo 同款实例化契约：js-string builtins +
+          // "_" 字符串常量模块。老浏览器不认这两个编译选项会抛
+          // TypeError——落到 run() 的 catch 变成人话。
+          var mod = new WebAssembly.Module(buf, {
+            builtins: ['js-string'],
+            importedStringConstants: '_',
+          });
+          engineModule = mod;
+          return mod;
+        })().catch(function (e) {
+          enginePromise = null;
+          throw e;
+        });
+      }
+      return enginePromise;
+    }
+
+    // 每轮运行一个全新实例（见上头注释：跨轮残留的规避）
+    async function freshEngine() {
+      var mod = await loadEngine();
+      var inst = await WebAssembly.instantiate(mod, {});
+      return inst.exports;
+    }
+
+    /* 引擎版本上屏：wasm 是钉在 public/vitro/ 里的固定产物（见本脚本头注），
+       但"固定"对读者不可见等于没钉。每个运行面板的栏尾标注
+       engine / protocol 版本，读者复现结论时知道该找哪一版对账；
+       将来换产物（npm run sync-vitro）这里随之更新， drift 无处藏身。 */
+    function stampEngineVersion(gw) {
+      var label =
+        'engine ' + gw.engine_version() +
+        ' · proto ' + gw.protocol_version();
+      document.querySelectorAll('.code-run__bar').forEach(function (bar) {
+        if (bar.querySelector('.code-run__ver')) return;
+        bar.appendChild(el('span', 'code-run__ver', label));
+      });
+    }
+
+    /* ------------------------------------------------------------
+       协议帧：所有方法都是 { id, method, params } → { id, ok, result }
+       gw 显式传入而非闭包捕获——调用点本来就得拿着 gw，少一处隐式依赖
+       ------------------------------------------------------------ */
+    var frameId = 0;
+
+    function invoke(gw, method, params) {
+      var frame = { id: ++frameId, method: method };
+      if (params) frame.params = params;
+      return JSON.parse(gw.invoke(JSON.stringify(frame)));
+    }
+
+    function bodyOf(frame) {
+      return frame && frame.result !== undefined ? frame.result : frame || {};
+    }
+
+    // C 程序的字节流：Latin-1 逐字节折回再按 UTF-8 解（demo/host 同口径）
+    function latin1ToUtf8(delta) {
+      if (!delta) return '';
+      var bytes = new Uint8Array(delta.length);
+      for (var i = 0; i < delta.length; i++) {
+        bytes[i] = delta.charCodeAt(i) & 0xff;
+      }
+      return new TextDecoder('utf-8').decode(bytes);
+    }
+
+    function el(tag, cls, text) {
+      var node = document.createElement(tag);
+      if (cls) node.className = cls;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+
+    /* ------------------------------------------------------------
+       每个运行目标：运行按钮 + 输出面板（面板首次运行才填内容）
+
+       host 两种形态（2026-10-14 泛化）：
+         · figure.code-figure —— MDX 围栏（CodeFrame 刚包好的）
+         · [data-vitro] 容器  —— 程序页；源码取容器内的 pre.astro-code，
+                                  argv/stdin 取容器 data 属性（.c 头注释）
+       ------------------------------------------------------------ */
+    function setupBlock(host) {
+      var figure =
+        host.classList && host.classList.contains('code-figure')
+          ? host
+          : host.querySelector('.code-figure');
+      if (!figure) return; // 装饰脚本没跑到位，不硬撑
+      var actions = figure.querySelector('.code-actions');
+      if (!actions) return;
+
+      var pre = figure.querySelector('pre.astro-code');
+      if (!pre) return;
+      var code = pre.querySelector('code');
+      var source = code ? code.innerText : pre.innerText;
+
+      // data-argv / data-stdin：空属性 = 空串，按 falsy 处理
+      var ds = host.dataset || {};
+      var argv = ds.argv ? ds.argv.split(/\s+/).filter(Boolean) : [];
+      var stdinLines = ds.stdin ? ds.stdin.split(/\s+/).filter(Boolean) : [];
+
+      var btn = el('button', 'code-run-btn', '运行');
+      btn.type = 'button';
+      btn.setAttribute('aria-label', '在浏览器里编译并运行这段 C 代码');
+      actions.insertBefore(btn, actions.firstChild);
+
+      var panel = el('div', 'code-run');
+      panel.hidden = true;
+      var bar = el('div', 'code-run__bar');
+      var status = el('span', 'code-run__status');
+      var meta = el('span', 'code-run__meta');
+      bar.append(status, meta);
+      var out = el('pre', 'code-run__out');
+      out.hidden = true;
+      var err = el('div', 'code-run__err');
+      err.hidden = true;
+      var diag = el('div', 'code-run__diag');
+      diag.hidden = true;
+      var stdinRow = el('div', 'code-run__stdin');
+      stdinRow.hidden = true;
+      var stdinInput = document.createElement('input');
+      stdinInput.type = 'text';
+      stdinInput.className = 'code-run__stdin-input';
+      stdinInput.setAttribute('aria-label', 'stdin 输入');
+      var feedBtn = el('button', 'code-run-btn', '喂入');
+      feedBtn.type = 'button';
+      stdinRow.append(stdinInput, feedBtn);
+      panel.append(bar, out, err, diag, stdinRow);
+      figure.appendChild(panel);
+
+      var ctx = {
+        panel: panel,
+        figure: figure,
+        btn: btn,
+        status: status,
+        meta: meta,
+        out: out,
+        err: err,
+        diag: diag,
+        stdinRow: stdinRow,
+        stdinInput: stdinInput,
+        source: source,
+        argv: argv,
+        stdinLines: stdinLines,
+        gw: null, // 当轮运行的引擎实例（喂入续跑用；每轮运行都是新实例）
+      };
+
+      btn.addEventListener('click', function () {
+        void run(ctx);
+      });
+      feedBtn.addEventListener('click', function () {
+        feed(ctx);
+      });
+      stdinInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          feed(ctx);
+        }
+      });
+    }
+
+    function setStatus(ctx, state, text, metaText) {
+      ctx.status.textContent = text;
+      ctx.status.dataset.state = state || '';
+      ctx.meta.textContent = metaText || '';
+    }
+
+    function resetPanel(ctx) {
+      ctx.out.hidden = true;
+      ctx.out.textContent = '';
+      ctx.err.hidden = true;
+      ctx.err.textContent = '';
+      ctx.diag.hidden = true;
+      ctx.diag.textContent = '';
+      ctx.stdinRow.hidden = true;
+    }
+
+    async function run(ctx) {
+      ctx.btn.disabled = true;
+      ctx.btn.textContent = engineModule ? '运行中…' : '加载引擎中…';
+      // 退出回放态：VitroScrubber 采集时给 figure 挂过 replaying（输出框固定高度
+      // + 内部滚动）。运行要看完整输出，别被上次回放的 16rem 框住。
+      if (ctx.figure) ctx.figure.classList.remove('replaying');
+      ctx.panel.hidden = false;
+      resetPanel(ctx);
+      setStatus(ctx, 'busy', engineModule ? '运行中…' : '加载引擎中…', 'Vitro wasm-gc 引擎');
+      try {
+        var gw = await freshEngine();
+        stampEngineVersion(gw);
+        ctx.gw = gw; // 喂入续跑用同一实例（输入缓冲在实例里）
+        ctx.btn.textContent = '运行中…';
+        // 每次运行重建会话：清掉上次的编译态与粘滞的 argv/输入模式
+        invoke(gw, 'session.create', null);
+        // deterministic=true：同一段代码每次跑出同一结果——博客要可复现
+        invoke(gw, 'config.set', { deterministic: true });
+
+        var comp = bodyOf(invoke(gw, 'compile', { source: ctx.source }));
+        if (!comp.ok) {
+          renderDiagnostics(ctx, comp.diagnostics || []);
+          setStatus(ctx, 'err', '编译失败', (comp.diagnostics || []).length + ' 条诊断');
+          ctx.gw = null;
+          return;
+        }
+        // argv 走 run({argv})——不是 config.set / compile（实测只有这里送达）
+        var rr = bodyOf(invoke(gw, 'run', ctx.argv.length ? { argv: ctx.argv } : null));
+        if (rr.waiting_input) {
+          // @stdin 预喂：一次喂全。交互模式没有 EOF 口（input_mode_batch
+          // 设置被静默拒绝），所以程序必须自己知道读几次；喂剩的输入
+          // 随本次会话丢弃，不跨运行残留（每轮运行本就是新实例）。
+          if (ctx.stdinLines.length) {
+            var fed = bodyOf(invoke(gw, 'input.feed', { text: ctx.stdinLines.join('\n') + '\n' }));
+            if (!fed.waiting_input) {
+              finishRun(ctx, gw, fed);
+              return;
+            }
+          }
+          setStatus(ctx, 'wait', '等待输入', '程序要读 stdin——在下方输入后点「喂入」');
+          ctx.stdinRow.hidden = false;
+          ctx.stdinInput.focus();
+          renderOutput(ctx, pullOutput(gw));
+          return;
+        }
+        finishRun(ctx, gw, rr);
+      } catch (e) {
+        ctx.err.hidden = false;
+        ctx.err.textContent =
+          '运行出错：' + (e && e.message ? e.message : String(e)) +
+          '\n（本功能需要支持 wasm-gc 的现代浏览器：Chrome/Edge 130+、Firefox 134+）';
+        setStatus(ctx, 'err', '出错了', '');
+        ctx.gw = null;
+      } finally {
+        ctx.btn.disabled = false;
+        ctx.btn.textContent = '运行';
+      }
+    }
+
+    function feed(ctx) {
+      if (!ctx.gw) return;
+      var gw = ctx.gw;
+      var text = ctx.stdinInput.value;
+      var rr = bodyOf(invoke(gw, 'input.feed', { text: text + '\n' }));
+      if (rr.waiting_input) {
+        // 注意：input.feed 空文本的语义是「续推进一步」，不是 EOF；
+        // 交互模式下没有发 EOF 的协议口（config.set 不收
+        // input_mode_batch，EOF 粘滞只在 batch 模式输入耗尽时置位）。
+        // 所以「while (scanf(...) != EOF)」这类程序在本页无法收尾，
+        // 提示里说清楚，别让读者干等。
+        setStatus(ctx, 'wait', '仍在等待输入', '继续喂入——本页不提供 EOF 信号');
+        ctx.stdinInput.value = '';
+        ctx.stdinInput.focus();
+        renderOutput(ctx, pullOutput(gw));
+        return;
+      }
+      ctx.stdinRow.hidden = true;
+      finishRun(ctx, gw, rr);
+    }
+
+    function pullOutput(gw) {
+      var stdout = latin1ToUtf8(
+        bodyOf(invoke(gw, 'output.delta', { cursor: 0, stream: 'stdout' })).delta
+      );
+      var stderr = latin1ToUtf8(
+        bodyOf(invoke(gw, 'output.delta', { cursor: 0, stream: 'stderr' })).delta
+      );
+      var text = stdout;
+      if (stderr) {
+        text += (text ? '\n' : '') + '—— stderr ——\n' + stderr;
+      }
+      return text;
+    }
+
+    function finishRun(ctx, gw, rr) {
+      renderOutput(ctx, pullOutput(gw));
+      if (rr.status === 'trap') {
+        ctx.err.hidden = false;
+        ctx.err.textContent = rr.trap || '（trap，无消息）';
+        setStatus(ctx, 'err', 'trap（受检终止）', runMeta(rr));
+      } else if (rr.status === 'finished') {
+        setStatus(ctx, 'ok', '完成', runMeta(rr));
+      } else {
+        setStatus(ctx, 'busy', rr.status || '未知状态', runMeta(rr));
+      }
+      // 运行结束（含 trap）即释放实例引用——每轮运行都是独立实例，
+      // 不释放的话一个 C 块会攥着一个 wasm 内存到页面关闭。
+      // waiting_input 分支不释放：stdin 续跑还要用这个实例。
+      ctx.gw = null;
+    }
+
+    function runMeta(rr) {
+      var parts = [];
+      if (rr.status === 'finished') parts.push('返回值 ' + rr.return_value);
+      if (typeof rr.steps_executed === 'number') {
+        // 千分位：六位数起步数（如斐波那契 1,960,430）不加分隔符没法读
+        parts.push(rr.steps_executed.toLocaleString('en-US') + ' 步');
+      }
+      return parts.join(' · ');
+    }
+
+    function renderOutput(ctx, text) {
+      if (text) {
+        ctx.out.textContent = text;
+        ctx.out.hidden = false;
+      } else {
+        ctx.out.hidden = true;
+        ctx.out.textContent = '';
+      }
+    }
+
+    function renderDiagnostics(ctx, diags) {
+      ctx.diag.hidden = false;
+      diags.forEach(function (d) {
+        var item = el('div', 'code-run__diag-item');
+        var head = el('div', 'code-run__diag-head');
+        head.append(
+          el('span', 'code-run__diag-code', d.code || d.error_code || ''),
+          el(
+            'span',
+            'code-run__diag-loc',
+            (d.filename || 'main.c') + ' 行 ' + d.line + ':' + d.column
+          )
+        );
+        item.append(head);
+        if (d.message) {
+          item.append(el('div', 'code-run__diag-msg', d.message));
+        }
+        if (d.fix_suggestion) {
+          item.append(el('div', 'code-run__diag-fix', '建议：' + d.fix_suggestion));
+        }
+        ctx.diag.appendChild(item);
+      });
+    }
+
+    /* ------------------------------------------------------------
+       调试面接缝（2026-10-14，PLAN-vitro.md §四 step ②）：
+       VitroScrubber.astro（只注入程序页）复用本脚本的引擎装载 / 协议帧 /
+       Latin-1 解码——不各写一份，也就没有两套行为漂移。window 单点是
+       两段内联脚本之间唯一的通信通道：都是本站自己的代码，无外部依赖，
+       键名带 __vitro 前缀防撞。
+       ------------------------------------------------------------ */
+    window.__vitroCore = {
+      freshEngine: freshEngine,
+      invoke: invoke,
+      bodyOf: bodyOf,
+      latin1ToUtf8: latin1ToUtf8,
+      hasEngine: function () {
+        return engineModule !== null;
+      },
+    };
+
+    /* ------------------------------------------------------------
+       目标发现（2026-10-14 泛化）：
+         · [data-vitro] 容器 —— 程序页；argv/stdin 取自容器 data 属性
+         · pre.astro-code[data-language="c"] —— MDX 围栏兜底；
+           已在某个 [data-vitro] 里的不重复绑定
+       ------------------------------------------------------------ */
+    var hosts = [];
+    document.querySelectorAll('[data-vitro]').forEach(function (node) {
+      hosts.push(node);
+    });
+    document.querySelectorAll('pre.astro-code[data-language="c"]').forEach(function (pre) {
+      var host = pre.closest('[data-vitro]') || pre.closest('.code-figure');
+      if (host && hosts.indexOf(host) === -1) hosts.push(host);
+    });
+    hosts.forEach(setupBlock);
+  })();
+</script>

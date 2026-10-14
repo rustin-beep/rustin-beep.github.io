@@ -303,6 +303,152 @@ main {
   border-color: var(--color-accent);
 }
 
+/* --- 代码块操作区：复制 / 运行按钮收在一起，bar 保持两段式 --- */
+.code-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* --- C 代码块「运行」按钮（样式与复制对齐，同一族） --- */
+.code-run-btn {
+  appearance: none;
+  border: 1px solid var(--color-surface-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-surface-muted);
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+  padding: 0 var(--space-2);
+  cursor: pointer;
+}
+
+.code-run-btn:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.code-run-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* --- 运行结果面板（Vitro wasm-gc 引擎在浏览器内执行）---
+   结构由 PostLayout 的运行脚本注入，挂在 figure.code-figure 末尾：
+     div.code-run
+       ├─ div.code-run__bar     ← 状态 + meta（返回值/步数/字节数）
+       ├─ pre.code-run__out     ← stdout（stderr 以分隔行附在同一框内）
+       ├─ div.code-run__err     ← trap / 加载失败 / 运行异常（重音色）
+       ├─ div.code-run__diag    ← 编译期诊断（错误码 + 位置 + 修建议）
+       └─ div.code-run__stdin   ← 等待输入时才出现的 stdin 行 */
+.code-run {
+  border-top: 1px solid var(--color-surface-border);
+  background: var(--color-code-bg);
+  color: var(--color-code-fg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-code);
+}
+
+/* hidden 属性与 display 的战争：本面板内有 flex 行，作者样式里的
+   display 会盖掉 UA 的 [hidden]{display:none}，"隐藏"的面板就会常驻。
+   显式钉死（2026-10-14 加面板时预填的坑，不是踩出来的）。 */
+.code-run [hidden] {
+  display: none !important;
+}
+
+.code-run__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4) var(--space-1);
+  color: var(--color-surface-muted);
+  font-size: var(--fs-xs);
+}
+
+.code-run__status {
+  font-weight: 500;
+}
+
+/* 引擎版本戳：wasm 是钉死的固定产物，版本必须对读者可见（可归因） */
+.code-run__ver {
+  margin-left: auto;
+  color: var(--color-surface-muted);
+}
+
+.code-run__status[data-state='err'] {
+  color: var(--color-accent);
+}
+
+.code-run__out {
+  margin: 0;
+  padding: 0 var(--space-4) var(--space-3);
+  font: inherit;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+}
+
+.code-run__err {
+  padding: 0 var(--space-4) var(--space-3);
+  color: var(--color-accent);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.code-run__diag {
+  padding: 0 var(--space-4) var(--space-3);
+}
+
+.code-run__diag-item + .code-run__diag-item {
+  margin-top: var(--space-2);
+}
+
+.code-run__diag-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  color: var(--color-accent);
+}
+
+.code-run__diag-code {
+  font-weight: 500;
+}
+
+.code-run__diag-loc {
+  color: var(--color-surface-muted);
+}
+
+.code-run__diag-msg {
+  color: var(--color-surface-fg);
+}
+
+.code-run__diag-fix {
+  color: var(--color-surface-muted);
+}
+
+.code-run__stdin {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-4) var(--space-3);
+}
+
+.code-run__stdin-input {
+  flex: 1 1 12rem;
+  min-width: 0;
+  appearance: none;
+  border: 1px solid var(--color-surface-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-surface-fg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  padding: var(--space-1) var(--space-2);
+}
+
 .astro-code {
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
@@ -408,6 +554,199 @@ main {
   font-size: var(--fs-sm);
 }
 
+/* --- 时间旅行回放（Vitro step 流采集 + 本地帧回放，PLAN-vitro.md §四 step ②）---
+   结构由 VitroScrubber 注入，挂在 figure.code-figure 末尾（运行面板之下）：
+     div.vitro-replay
+       ├─ __bar    ← 播放/单步/粒度/拖条/帧进度
+       ├─ __phase  ← 【语义标签】第 L 行 · 函数 · 第 N 步
+       ├─ __grid   ← 变量表 | 调用栈 | 数组柱状图
+       ├─ __out    ← 到此为止的 stdout（采集时按帧记长度切片）
+       └─ __note   ← 截断 / trap / 等待输入等采集终止原因 */
+.vitro-replay {
+  border-top: 1px solid var(--color-surface-border);
+  background: var(--color-code-bg);
+  color: var(--color-code-fg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-code);
+}
+
+/* 同 .code-run：hidden 与 display 的战争，显式钉死 */
+.vitro-replay [hidden] {
+  display: none !important;
+}
+
+.vitro-replay__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4) var(--space-1);
+}
+
+/* 拖条：accent-color 一行搞定现代浏览器，不引任何样式框架 */
+.vitro-replay__scrub {
+  flex: 1 1 10rem;
+  min-width: 0;
+  accent-color: var(--color-accent);
+}
+
+.vitro-replay__prog {
+  color: var(--color-surface-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+/* 粒度分段控件：两枚按钮拼一组，选中态用 aria-pressed（无 JS 类名游戏） */
+.vitro-replay__gran {
+  display: flex;
+}
+
+.vitro-replay__gran .code-run-btn {
+  border-radius: 0;
+}
+
+.vitro-replay__gran .code-run-btn:first-child {
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+
+.vitro-replay__gran .code-run-btn:last-child {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.vitro-replay__gran .code-run-btn[aria-pressed='true'] {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.vitro-replay__phase {
+  padding: var(--space-1) var(--space-4);
+  color: var(--color-surface-fg);
+  font-size: var(--fs-xs);
+}
+
+.vitro-replay__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  align-items: start;
+}
+
+.vitro-replay__sub,
+.vr-sub {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--color-surface-muted);
+  margin-bottom: var(--space-1);
+}
+
+.vitro-replay__vars table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.vitro-replay__vars th,
+.vitro-replay__vars td {
+  text-align: left;
+  padding: 0 var(--space-2) 0 0;
+  font-weight: 400;
+  font-size: var(--fs-xs);
+  color: var(--color-code-fg);
+}
+
+.vitro-replay__vars th {
+  color: var(--color-surface-muted);
+}
+
+.vr-frm {
+  color: var(--color-code-fg);
+}
+
+.vr-arrow {
+  margin: 0 var(--space-1);
+  color: var(--color-surface-muted);
+}
+
+.vr-muted {
+  color: var(--color-surface-muted);
+  font-size: var(--fs-xs);
+}
+
+.vitro-replay__arrays {
+  grid-column: 1 / -1;
+}
+
+.vr-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-1);
+  height: 4rem;
+}
+
+.vr-item + .vr-item {
+  margin-top: var(--space-2);
+}
+
+.vr-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  height: 100%;
+}
+
+.vr-bar {
+  width: 1.5rem;
+  min-height: 1px;
+  background: var(--color-accent);
+}
+
+.vr-num {
+  font-size: var(--fs-xs);
+  color: var(--color-surface-muted);
+}
+
+.vitro-replay__out {
+  margin: 0;
+  padding: 0 var(--space-4) var(--space-3);
+  font: inherit;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* 空态：这一帧程序还没输出——弱化显示，与真输出区分开 */
+.vitro-replay__out--empty {
+  color: var(--color-surface-muted);
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+}
+
+/* ★ 回放态：输出框**固定高度 + 内部滚动**（2026-10-14 用户反馈"拖动被拉回起始位置"）。
+   根因：输出随拖动长高 ⇒ 它下面的控制条（含拖条）被顶下去 ⇒ 鼠标还停在原处但滑块已经
+   不在那儿了 ⇒ 浏览器按新位置重算值 = 看起来"被拉回 0"。
+   ★ 必须写死 height 而不是 max-height：max-height 只封顶，框仍会从 0 长到顶，
+   控制条照样一路往下挪（实测拖动期间 barTop 会漂移十几像素）。固定高度后
+   控制条从采集开始到结束一个像素都不动，拖动才稳。
+   运行态不加这个类，输出照常自然展开（不会被框住）。 */
+.code-figure.replaying .code-run__out,
+.code-figure.replaying .vitro-replay__out {
+  height: 16rem;
+  overflow-y: auto;
+}
+
+.vitro-replay__note {
+  padding: 0 var(--space-4) var(--space-3);
+  color: var(--color-accent);
+  font-size: var(--fs-xs);
+  white-space: pre-wrap;
+}
+
+/* 当前行高亮：Shiki 的 span.line 是 inline，背景覆盖文本 run——
+   代码高亮器的常规形态（不改 display，否则 pre 里的换行符会炸出空行）。 */
+.astro-code span.line.on {
+  background: var(--color-accent-subtle);
+}
 /* --- 标签（四周按键之一） --- */
 .tag {
   display: inline-block;

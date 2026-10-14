@@ -1,0 +1,608 @@
+---
+/**
+ * 时间旅行 scrubber —— Vitro step 流采集 + 本地帧回放（PLAN-vitro.md §四 step ②）
+ * ----------------------------------------------------------------------------
+ * 2026-10-14 落地。形态参照 Vitro demo/js/timetravel.ts（协议序的唯一权威
+ * 佐证），实现自己写、按博客裁剪：**不接**调用树 / 断点 / 引擎跳转 / 内存地图
+ * （demo 有，但博客第一期只要"拖动 → 全屏状态随执行位置变"的核心体验；
+ * 断点与调用树留 v2，见 PLAN-vitro.md §十一）。
+ *
+ * 协议序（实测口径，缺一不可）：
+ *   freshEngine → session.create → config.set{deterministic} → compile
+ *   → run{argv?}（**必须先跑一遍**注入会话运行态）→ step.begin
+ *   → [breakpoints 必须在 begin 之后，本期不断点] → step.next 循环采 payloads
+ *
+ * 关键实测约束（PLAN-vitro.md §二）：
+ *   · 采集 ~11.5k 帧/s ⇒ 每 COLLECT_CHUNK 帧让出主线程，长程序不冻页面
+ *   · 原始 payload ~730B/帧（fib(20) 27 万帧 = 229MB）⇒ 投影只留渲染字段
+ *     + FRAME_CAP 4000 帧截断（沿用 demo 的 STEP_FRAME_CAP）
+ *   · seek 2.42ms/次 ⇒ **拖条走本地帧数组**，不调引擎
+ *   · 回放中 stdout 随步增长 ⇒ 采集时按批记输出长度， scrub 时切片
+ *   · prefers-reduced-motion ⇒ 采集完不自动播放
+ *
+ * 依赖 VitroRunner 先跑（window.__vitroCore 接缝）：引擎装载 / 协议帧 /
+ * Latin-1 解码共用一份，不写两套。只注入程序页——文章页的 c 围栏没有
+ * 「回放」按钮，本脚本过去也空转返回。
+ */
+---
+
+<script is:inline>
+  (function () {
+    'use strict';
+
+    var core = window.__vitroCore;
+    if (!core) return; // VitroRunner 没跑（本脚本只应出现在程序页）
+
+    var FRAME_CAP = 20000; // 帧上限。**实测口径（2026-10-14，Node 25 直连）**：
+    // 2 万帧 = 0.60s / 1.85MB 投影、10 万帧 = 2.34s / 9.5MB、100 万帧 = 28.7s / 98.7MB。
+    // 取 2 万帧 = "采集 0.6 秒、手感仍然即时"这一档；旧值 4000 是抄 demo 的
+    // STEP_FRAME_CAP（前端预算），当时误当引擎上限，已按实测提高 5 倍。
+    var COLLECT_CHUNK = 250; // 每批帧数：批间 setTimeout 让出主线程
+    var PLAY_FPS = 30; // 播放目标帧率（时间戳驱动，渲染跟不上自动合帧）
+
+    function el(tag, cls, text) {
+      var node = document.createElement(tag);
+      if (cls) node.className = cls;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+
+    function esc(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function firstLine(s) {
+      return String(s || '').split('\n')[0];
+    }
+
+    /* 投影：原始 payload 只留渲染要用的字段（~730B → ~150B/帧）。
+       v = [name, ty, value]；c = [func_name]；数组柱状从 v 里 int[N]/{…} 解析
+       （与 demo 同口径——不再单独存 array_snapshots）。 */
+    function project(p) {
+      return {
+        i: p.step_index,
+        l: p.code_line,
+        s: p.semantic_label || '',
+        fn: p.func_name || '',
+        v: (p.local_vars || []).map(function (x) {
+          return [x.name, x.ty_name, x.value];
+        }),
+        c: (p.call_stack || []).map(function (f) {
+          return f.func_name;
+        }),
+      };
+    }
+
+    /* 语句级粒度：相邻同行帧合并，只留组末帧（demo coalesceStmt 口径）。
+       冒泡 872 指令帧 → 约 60 语句帧，节奏逼近手编且每帧仍是真值。 */
+    function toStmt(raw, outLens) {
+      var frames = [];
+      var lens = [];
+      var i = 0;
+      while (i < raw.length) {
+        var j = i;
+        while (j + 1 < raw.length && raw[j + 1].l === raw[i].l) j++;
+        raw[j]._g = j - i + 1; // 组内指令数（渲染"合并 K 条指令"用）
+        frames.push(raw[j]);
+        lens.push(outLens[j]);
+        i = j + 1;
+      }
+      return { frames: frames, lens: lens };
+    }
+
+    function setupReplay(host) {
+      // 双形态宿主（同 VitroRunner）：[data-vitro] 容器，或
+      // 已被 CodeFrame 包好的 figure（MDX 围栏——每个围栏都能回放）
+      var figure =
+        host.classList && host.classList.contains('code-figure')
+          ? host
+          : host.querySelector('.code-figure');
+      var actions = figure && figure.querySelector('.code-actions');
+      var pre = figure && figure.querySelector('pre.astro-code');
+      if (!actions || !pre) return; // 装饰脚本没跑到位，不硬撑
+      var code = pre.querySelector('code');
+      var source = code ? code.innerText : pre.innerText;
+      var ds = host.dataset || {};
+      var argv = ds.argv ? ds.argv.split(/\s+/).filter(Boolean) : [];
+      var stdinLines = ds.stdin ? ds.stdin.split(/\s+/).filter(Boolean) : [];
+
+      /* ---- 控件 ---- */
+      var btn = el('button', 'code-run-btn', '回放');
+      btn.type = 'button';
+      btn.setAttribute('aria-label', '采集执行轨迹并回放（时间旅行）');
+      // 插在「运行」之后、复制之前
+      actions.insertBefore(btn, actions.firstChild ? actions.firstChild.nextSibling : null);
+
+      var panel = el('div', 'vitro-replay');
+      panel.hidden = true;
+
+      var bar = el('div', 'vitro-replay__bar');
+      var playBtn = el('button', 'code-run-btn', '▶ 播放');
+      playBtn.type = 'button';
+      playBtn.setAttribute('aria-label', '播放 / 暂停回放');
+      var prevBtn = el('button', 'code-run-btn', '◀');
+      prevBtn.type = 'button';
+      prevBtn.setAttribute('aria-label', '上一帧');
+      var nextBtn = el('button', 'code-run-btn', '▶');
+      nextBtn.type = 'button';
+      nextBtn.setAttribute('aria-label', '下一帧');
+      var gran = el('div', 'vitro-replay__gran');
+      var granStmt = el('button', 'code-run-btn', '语句');
+      granStmt.type = 'button';
+      granStmt.setAttribute('aria-pressed', 'true');
+      var granInst = el('button', 'code-run-btn', '指令');
+      granInst.type = 'button';
+      granInst.setAttribute('aria-pressed', 'false');
+      gran.append(granStmt, granInst);
+      var scrub = document.createElement('input');
+      scrub.type = 'range';
+      scrub.className = 'vitro-replay__scrub';
+      scrub.min = '0';
+      scrub.max = '0';
+      scrub.value = '0';
+      scrub.setAttribute('aria-label', '执行进度（拖动回放）');
+      var prog = el('span', 'vitro-replay__prog');
+      bar.append(playBtn, prevBtn, nextBtn, gran, scrub, prog);
+
+      var phase = el('div', 'vitro-replay__phase', '（点「回放」采集执行轨迹）');
+
+      var grid = el('div', 'vitro-replay__grid');
+      var varsBox = el('div', 'vitro-replay__vars');
+      var stackBox = el('div', 'vitro-replay__stack');
+      var arraysHead = el('div', 'vitro-replay__sub', '数组');
+      arraysHead.hidden = true;
+      var arraysBox = el('div', 'vitro-replay__arrays');
+      arraysBox.hidden = true;
+      grid.append(varsBox, stackBox, arraysHead, arraysBox);
+
+      // ★ 输出区统合（2026-10-14 用户反馈）：复用「运行」面板的输出框，
+      //   全页**只有一个输出区**、就贴在代码下面；回放时它按时间轴生长，
+      //   运行时就显示最终结果。此前面板里另建一个小的 stdout 框，
+      //   被挤在变量表下面、小得认不出来（用户原话："哪有输出区？"）。
+      var runPanel = figure.querySelector('.code-run');
+      var runOut = runPanel ? runPanel.querySelector('.code-run__out') : null;
+      var runStatus = runPanel ? runPanel.querySelector('.code-run__status') : null;
+      var runMetaEl = runPanel ? runPanel.querySelector('.code-run__meta') : null;
+      var ownOut = !runOut;
+      var out = runOut || el('pre', 'vitro-replay__out');
+      out.hidden = false;
+      var note = el('div', 'vitro-replay__note');
+      note.hidden = true;
+
+      panel.append(bar, phase, grid, note);
+      if (ownOut) panel.insertBefore(out, note); // 没有运行面板时才自建（保底）
+      figure.appendChild(panel);
+
+      /* ---- 状态 ---- */
+      var dragUntil = 0; // 松手后的保护尾（补 pointerup 迟到的场景）
+      var dragging = false; // ★ 指针正按在拖条上（pointerdown→pointerup 之间）
+      var state = {
+        raw: [], // 投影后的指令帧（粒度重算的单一数据源）
+        frames: [], // 当前粒度的播放数组
+        lens: [], // 每帧对应的 stdout 长度
+        idx: 0,
+        timer: 0,
+        busy: false,
+        stopped: '',
+        fullOutput: '',
+        totalSteps: 0, // 引擎跑完整程序自报的步数（用于说明回放覆盖了多少）
+        // ★ 用户是否已亲手碰过时间轴。碰过就不再自动播放——否则采集刚结束的那次
+        //   play() 会把用户刚拖到的位置继续往前推，看起来像"被回拨/被抢走"
+        //   （2026-10-14 用户反馈"拖动被回拨到起始位置"）。
+        userTookOver: false,
+      };
+
+      function setPhase(text) {
+        phase.textContent = text;
+      }
+      function setProg(text) {
+        prog.textContent = text;
+      }
+      function setNote(text) {
+        if (text) {
+          note.hidden = false;
+          note.textContent = text;
+        } else {
+          note.hidden = true;
+          note.textContent = '';
+        }
+      }
+
+      /* ---- 采集 ---- */
+      function collect() {
+        if (state.busy) return;
+        state.busy = true;
+        stop();
+        // 清掉上一轮的播放数组：重采集期间拖/播旧帧会造成"看到的数据不属于
+        // 当前这次采集"的错位
+        state.frames = [];
+        state.lens = [];
+        state.idx = 0;
+        state.userTookOver = false; // 每次点「回放」都当成新的一轮意图
+        scrub.max = '0';
+        scrub.value = '0';
+        // ★ 采集期间锁住拖条：这一秒多里帧数组还是空的，`goto()` 会直接 return，
+        //   用户的拖动会被静默吞掉，紧接着 goto(0)+play() 又把滑块拉回起点——
+        //   这正是"一拖就弹回起始位置"的来源之一（2026-10-14 实测复现）。
+        scrub.disabled = true;
+        btn.disabled = true;
+        btn.textContent = '采集中…';
+        panel.hidden = false;
+        // ★ 统合：输出区就是「运行」面板那个框（已在上方复用），这里只把
+        //   它的**陈旧结果清掉**、顶部状态改写成回放态——否则读者会看到
+        //   "完成 872 步"的旧状态压在一个正随时间轴生长的框上面。
+        //   ★★ 必须把 .code-run 面板本身显示出来：输出框在它里面，面板 hidden
+        //   的时候框再"可见"也一个像素都渲染不出来——用户报的"打印失效"就是
+        //   这个（2026-10-14 实测：runPanelHidden=true、outVisible=false）。
+        // ★ 同时给 figure 挂 replaying：输出框转为**固定高度 + 内部滚动**，
+        //   否则它长高会把下面的控制条顶下去，滑块从鼠标底下跑掉。
+        figure.classList.add('replaying');
+        if (runPanel) runPanel.hidden = false;
+        if (runStatus) runStatus.textContent = '回放模式 · 输出随进度条生长';
+        if (runMetaEl) runMetaEl.textContent = '';
+        out.textContent = '';
+        out.hidden = false; // 高度从采集一开始就占位，控制条全程不移位
+        if (runPanel) {
+          var staleErr = runPanel.querySelector('.code-run__err');
+          var staleDiag = runPanel.querySelector('.code-run__diag');
+          var staleStdin = runPanel.querySelector('.code-run__stdin');
+          if (staleErr) staleErr.hidden = true;
+          if (staleDiag) staleDiag.hidden = true;
+          if (staleStdin) staleStdin.hidden = true;
+        }
+        setNote('');
+        setPhase('采集中：step.begin + step.next 推进引擎…');
+        setProg('');
+        varsBox.innerHTML = '';
+        stackBox.textContent = '';
+        arraysBox.innerHTML = '';
+        arraysBox.hidden = true;
+        arraysHead.hidden = true;
+
+        void (async function () {
+          try {
+            var gw = await core.freshEngine();
+            core.invoke(gw, 'session.create', null);
+            core.invoke(gw, 'config.set', { deterministic: true });
+            var comp = core.bodyOf(core.invoke(gw, 'compile', { source: source }));
+            if (!comp.ok) {
+              setPhase('采集失败：先解决编译诊断（点「运行」可见明细）');
+              return;
+            }
+            var rr = core.bodyOf(core.invoke(gw, 'run', argv.length ? { argv: argv } : null));
+            // 这一趟是全量跑（不是步进），rr.steps_executed 就是程序的总步数——
+            // 后面用它告诉读者回放到底覆盖了百分之几
+            state.totalSteps = typeof rr.steps_executed === 'number' ? rr.steps_executed : 0;
+            if (rr.waiting_input && stdinLines.length) {
+              // @stdin 预喂（与运行按钮同口径；无 EOF 口，程序须自知读几次）
+              core.bodyOf(core.invoke(gw, 'input.feed', { text: stdinLines.join('\n') + '\n' }));
+            }
+            core.invoke(gw, 'step.begin', null);
+
+            var raw = [];
+            var outLens = [];
+            var stopped = '';
+            var done = false;
+            while (!done && !stopped && raw.length < FRAME_CAP) {
+              var batch = null;
+              for (var k = 0; k < COLLECT_CHUNK; k++) {
+                batch = core.bodyOf(core.invoke(gw, 'step.next', null));
+                if (batch.waiting_input) {
+                  stopped = '程序等待输入（scanf）——回放到暂停点为止';
+                  break;
+                }
+                if (batch.trapped) {
+                  stopped = '受检终止：' + firstLine(batch.trap_message || batch.trap);
+                  break;
+                }
+                var pls = batch.payloads || [];
+                // 输出长度按批记（一批通常 1 帧；批内帧共享同一长度，
+                // 视觉上无差别——stdout 本就只在 IO 帧增长）
+                var outText = core.latin1ToUtf8(
+                  core.bodyOf(core.invoke(gw, 'output.delta', { cursor: 0, stream: 'stdout' })).delta
+                );
+                for (var j = 0; j < pls.length; j++) {
+                  raw.push(project(pls[j]));
+                  outLens.push(outText.length);
+                }
+                if (batch.finished) {
+                  done = true;
+                  break;
+                }
+              }
+              setProg(raw.length + ' 帧');
+              if (!done && !stopped && raw.length < FRAME_CAP) {
+                await new Promise(function (r) {
+                  setTimeout(r, 0);
+                });
+              }
+            }
+            if (raw.length >= FRAME_CAP && !stopped) {
+              // ★ 必须说清"截断到什么程度"（2026-10-14 用户问：Julia 跑到最后只印了两行符号，
+              //   这是引擎的锅还是我们的？——是我们的）。引擎侧没有 2 万这道坎：它把整程序
+              //   769,182 步跑完了（max_steps 默认 1e7，状态是"完成"）。这个 20000 是
+              //   **我们的前端预算**：步进协议每次只推一条指令，要全量就得 round-trip 769k 次
+              //   （实测 ~11.5k 帧/s ⇒ ≈67s、≈115MB 投影），不是把常数调大就能解决。
+              //   所以把真实覆盖率报出来，并把读者指向「运行」——那份输出是完整的。
+              var lastStep = raw.length ? raw[raw.length - 1].i : 0;
+              var detail = '';
+              if (state.totalSteps > lastStep) {
+                detail =
+                  '（全程序 ' + state.totalSteps.toLocaleString('en-US') + ' 步 · 只覆盖到 ' +
+                  ((lastStep / state.totalSteps) * 100).toFixed(1) + '%）——点「运行」看完整输出';
+              }
+              stopped = '回放只到第 ' + lastStep.toLocaleString('en-US') + ' 步' + detail;
+            }
+            state.raw = raw;
+            state.lens = outLens; // ★ 与 raw 等长、按帧对齐——applyGran 的输入
+            state.stopped = stopped;
+            state.fullOutput = core.latin1ToUtf8(
+              core.bodyOf(core.invoke(gw, 'output.delta', { cursor: 0, stream: 'stdout' })).delta
+            );
+            applyGran('stmt');
+            setNote(stopped);
+            goto(0);
+            // ★ 先解锁再自动播放：play() 有 busy 守卫（采集中不让播），
+            //   放在 finally 之后解锁会导致这里被挡掉（2026-10-14 实测踩到）
+            state.busy = false;
+            btn.disabled = false;
+            scrub.disabled = false;
+            btn.textContent = '回放';
+            // 尊重 prefers-reduced-motion；用户已亲手接管过时间轴也不再自动播放
+            if (!state.userTookOver && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+              play();
+            }
+          } catch (e) {
+            setPhase('采集出错：' + (e && e.message ? e.message : String(e)));
+          } finally {
+            state.busy = false;
+            btn.disabled = false;
+            scrub.disabled = false;
+            btn.textContent = '回放';
+          }
+        })();
+      }
+
+      /* ---- 粒度切换：位置按比例回跳 ---- */
+      function applyGran(gran) {
+        stop();
+        var oldLen = state.frames.length;
+        var oldIdx = state.idx;
+        var built =
+          gran === 'stmt' ? toStmt(state.raw, state.lens) : { frames: state.raw, lens: state.lens };
+        state.frames = built.frames;
+        state.lens = built.lens;
+        granStmt.setAttribute('aria-pressed', String(gran === 'stmt'));
+        granInst.setAttribute('aria-pressed', String(gran === 'inst'));
+        scrub.max = String(Math.max(0, state.frames.length - 1));
+        var target =
+          oldLen > 1 ? Math.round((oldIdx / (oldLen - 1)) * (state.frames.length - 1)) : 0;
+        goto(Math.max(0, Math.min(target, state.frames.length - 1)));
+      }
+
+      function goto(i) {
+        if (!state.frames.length) return;
+        state.idx = Math.max(0, Math.min(i, state.frames.length - 1));
+        scrub.value = String(state.idx);
+        setProg('帧 ' + (state.idx + 1) + '/' + state.frames.length + ' · 第 ' + state.frames[state.idx].i + ' 步');
+        render(state.frames[state.idx], state.lens[state.idx]);
+      }
+
+      /* ---- 渲染一帧 ---- */
+      function render(f, outLen) {
+        setPhase(
+          '【' + (f.s || '执行') + '】第 ' + f.l + ' 行' +
+            (f.fn ? ' · ' + f.fn : '') +
+            ' · 第 ' + f.i + ' 步' +
+            (f._g && f._g > 1 ? ' · 合并 ' + f._g + ' 条指令' : '')
+        );
+
+        // 当前行高亮（Shiki 的 span.line 按行索引；滚动只做最小位移）。
+        // ★ 指针按在拖条上时**绝不滚动**：scrollIntoView 会滚页面，滑块就在
+        //   指针底下跟着跑，浏览器按新位置重算值 ⇒ 表现为"一拖就弹回起点"
+        //   （2026-10-14 用户两次反馈，实测复现）。dragging 是权威判据，
+        //   dragUntil 只补 pointerup 迟到/键盘拖动这类收不到 pointerdown 的场合。
+        var rows = pre.querySelectorAll('span.line');
+        for (var i = 0; i < rows.length; i++) rows[i].classList.remove('on');
+        if (f.l >= 1 && f.l <= rows.length) {
+          var row = rows[f.l - 1];
+          row.classList.add('on');
+          if (row.scrollIntoView && !dragging && Date.now() > dragUntil) {
+            row.scrollIntoView({ block: 'nearest' });
+          }
+        }
+
+        // 局部变量表
+        varsBox.innerHTML = f.v.length
+          ? '<table><tr><th>名称</th><th>类型</th><th>值</th></tr>' +
+            f.v
+              .map(function (v) {
+                return (
+                  '<tr><td>' + esc(v[0]) + '</td><td>' + esc(v[1]) + '</td><td>' + esc(v[2]) + '</td></tr>'
+                );
+              })
+              .join('') +
+            '</table>'
+          : '<span class="vr-muted">（此帧无局部变量）</span>';
+
+        // 调用栈链
+        stackBox.innerHTML = f.c.length
+          ? '<span class="vr-sub">调用栈</span>' +
+            f.c
+              .map(function (fn, i) {
+                return (i ? '<span class="vr-arrow">→</span>' : '') + '<span class="vr-frm">' + esc(fn) + '</span>';
+              })
+              .join('')
+          : '<span class="vr-muted">（空栈）</span>';
+
+        renderArrays(f);
+
+        // 到此为止的 stdout（采集时按帧记的长度切片）。
+        // 这一帧还没输出时显示提示而不是留白——否则读者分不清"还没输出"和"坏了"。
+        // （2026-10-14 用户实测反馈：分形那类程序输出集中在很后面，拖动时回放区长期空白，
+        //   让人以为"打印的东西是定死的、不跟进度条走"。）
+        if (outLen > 0) {
+          out.hidden = false;
+          out.textContent = state.fullOutput.slice(0, outLen);
+          out.classList.remove('vitro-replay__out--empty');
+          out.scrollTop = out.scrollHeight; // 固定高度后自动跟到最新输出
+
+        } else {
+          out.hidden = false;
+          out.textContent = '（程序执行到这里还没有输出——往后拖会看到它开始打印）';
+          out.classList.add('vitro-replay__out--empty');
+        }
+      }
+
+      /* ---- 数组柱状图：local_vars 里 int[N] 且值形如 {…} 的变量。
+             指令级回放能看到交换进行到一半的中间态——白箱教学的卖点。 ---- */
+      function renderArrays(f) {
+        var arrays = [];
+        for (var i = 0; i < f.v.length; i++) {
+          var ty = f.v[i][1];
+          var val = String(f.v[i][2]);
+          var m = /^[A-Za-z_]\w*\[\d+\]$/.test(ty) && val.match(/^\{([-,\d\s]*)\}$/);
+          if (!m) continue;
+          var nums = m[1].split(',').map(function (x) {
+            return parseInt(x, 10);
+          });
+          if (nums.length >= 2 && nums.length <= 32 && nums.every(function (n) { return !isNaN(n); })) {
+            arrays.push({ name: f.v[i][0], ty: ty, nums: nums });
+          }
+        }
+        if (!arrays.length) {
+          arraysBox.innerHTML = '';
+          arraysBox.hidden = true;
+          arraysHead.hidden = true;
+          return;
+        }
+        arraysBox.hidden = false;
+        arraysHead.hidden = false;
+        arraysBox.innerHTML = arrays
+          .map(function (a) {
+            var max = Math.max.apply(
+              null,
+              a.nums.map(function (n) {
+                return Math.abs(n);
+              })
+            );
+            if (!max) max = 1;
+            var cols = a.nums
+              .map(function (n) {
+                return (
+                  '<div class="vr-col"><div class="vr-bar" style="height:' +
+                  ((Math.abs(n) / max) * 100).toFixed(1) +
+                  '%"></div><div class="vr-num">' +
+                  n +
+                  '</div></div>'
+                );
+              })
+              .join('');
+            return (
+              '<div class="vr-item"><div class="vr-name">' + esc(a.name) + ' · ' + esc(a.ty) + '</div><div class="vr-chart">' + cols + '</div></div>'
+            );
+          })
+          .join('');
+      }
+
+      /* ---- 播放：时间戳驱动，渲染跟不上自动合帧（demo 同设计） ---- */
+      function play() {
+        if (!state.frames.length || state.busy) return;
+        stop();
+        if (state.idx >= state.frames.length - 1) goto(0);
+        playBtn.textContent = '⏸ 暂停';
+        var interval = Math.max(4, Math.round(1000 / PLAY_FPS));
+        var startIdx = state.idx;
+        var startedAt = Date.now();
+        state.timer = window.setInterval(function () {
+          var target = startIdx + Math.floor((Date.now() - startedAt) / interval);
+          if (target >= state.frames.length - 1) {
+            goto(state.frames.length - 1);
+            stop();
+            return;
+          }
+          if (target !== state.idx) goto(target);
+        }, interval);
+      }
+
+      function stop() {
+        if (state.timer) {
+          window.clearInterval(state.timer);
+          state.timer = 0;
+        }
+        playBtn.textContent = '▶ 播放';
+      }
+
+      /* ---- 事件 ---- */
+      btn.addEventListener('click', collect);
+      playBtn.addEventListener('click', function () {
+        if (state.timer) stop();
+        else play();
+      });
+      prevBtn.addEventListener('click', function () {
+        stop();
+        goto(state.idx - 1);
+      });
+      nextBtn.addEventListener('click', function () {
+        stop();
+        goto(state.idx + 1);
+      });
+      // ★ 拖动保护（三层，缺一层就会"弹回起点"）：
+      //   ① pointerdown 起 dragging=true 并停播——用户碰了时间轴就由他说了算；
+      //   ② render 里 dragging 期间不 scrollIntoView（否则页面滚动把滑块从指针
+      //      底下抽走，浏览器按新位置重算值 = 弹回起点）；
+      //   ③ userTookOver 让采集结束时的自动播放不再抢走位置；
+      //   兜底 dragUntil：pointerup 与最后一次 input 有时间差，松手后再守 400ms。
+      scrub.addEventListener('pointerdown', function () {
+        dragging = true;
+        state.userTookOver = true;
+        stop();
+      });
+      window.addEventListener('pointerup', function () {
+        if (!dragging) return;
+        dragging = false;
+        dragUntil = Date.now() + 400;
+      });
+      window.addEventListener('pointercancel', function () {
+        dragging = false;
+      });
+      scrub.addEventListener('keydown', function () {
+        state.userTookOver = true;
+      });
+      scrub.addEventListener('input', function () {
+        stop();
+        state.userTookOver = true;
+        dragUntil = Date.now() + 400;
+        goto(Number(scrub.value));
+      });
+      granStmt.addEventListener('click', function () {
+        if (state.raw.length) applyGran('stmt');
+      });
+      granInst.addEventListener('click', function () {
+        if (state.raw.length) applyGran('inst');
+      });
+    }
+
+    /* ------------------------------------------------------------
+       目标发现（与 VitroRunner 同款）：
+         · [data-vitro] 容器
+         · pre.astro-code[data-language="c"] —— MDX 围栏兜底；
+           已在某个 [data-vitro] 里的不重复绑定
+       2026-10-14：此前只扫 [data-vitro]，文章页的围栏一个都没绑上
+       （探针实测"围栏 8 / 回放 0"）——两条通道都要走同一套发现逻辑。
+       ------------------------------------------------------------ */
+    var hosts = [];
+    document.querySelectorAll('[data-vitro]').forEach(function (node) {
+      hosts.push(node);
+    });
+    document.querySelectorAll('pre.astro-code[data-language="c"]').forEach(function (pre) {
+      var host = pre.closest('[data-vitro]') || pre.closest('.code-figure');
+      if (host && hosts.indexOf(host) === -1) hosts.push(host);
+    });
+    hosts.forEach(setupReplay);
+  })();
+</script>

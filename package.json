@@ -9,6 +9,7 @@
     "preview": "astro preview",
     "check": "astro check",
     "contrast": "node scripts/check-contrast.mjs",
+    "sync-vitro": "node scripts/sync-vitro-wasm.mjs",
     "gate": "npm run check && npm run contrast && npm run build"
   },
   "dependencies": {
